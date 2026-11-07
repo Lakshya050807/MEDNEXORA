@@ -71,7 +71,8 @@ export function createPaymentController({
   clock = () => new Date(),
   reservationSetupWindowMs = 10 * 60 * 1000,
 }) {
-  const paymentEnabled = Boolean(paymentConfig?.keyId && paymentConfig?.keySecret);
+  const paymentEnabled = Boolean(paymentConfig?.keyId && paymentConfig?.keySecret
+    && ['test', 'live'].includes(paymentConfig.mode));
 
   async function findOwnedOrder(orderId, studentId) {
     if (!mongoose.isValidObjectId(orderId)) throw apiError(400, 'Enter a valid order ID.');
@@ -670,6 +671,10 @@ export function createPaymentController({
 
     webhook: async (request, response, next) => {
       try {
+        // A webhook secret alone must not be enough to process payment events.
+        // In staging, this keeps webhook-based entitlements disabled until a
+        // complete test API key pair is configured as well.
+        if (!paymentEnabled) return response.status(503).json({ message: 'Payments are not configured on this server.' });
         const secret = paymentConfig?.webhookSecret;
         if (!secret) return response.status(503).json({ message: 'Razorpay webhook verification is not configured.' });
         if (!Buffer.isBuffer(request.rawBody)) return response.status(400).json({ message: 'Webhook request body was not available for verification.' });

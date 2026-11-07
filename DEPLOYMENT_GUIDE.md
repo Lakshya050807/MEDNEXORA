@@ -31,6 +31,7 @@ Set backend variables in the hosting provider's **server-side secret/configurati
 | Variable | Required and format | Scope / sensitive? |
 |---|---|---|
 | `NODE_ENV` | Required: exactly `production` | Backend runtime; not sensitive |
+| `APP_ENV` | Set `staging` for staging or `production` for public production. If omitted with `NODE_ENV=production`, defaults to `production` for backwards-compatible strictness. Production-like runtime accepts only these two values | Backend runtime; not sensitive |
 | `PORT` | Host-provided port; defaults to `5000`; integer `1–65535` | Backend runtime; not sensitive |
 | `MONGODB_URI` | Required in production; `mongodb://` or `mongodb+srv://` URI for a TLS-enabled database user | Backend runtime; **sensitive** (contains database credentials) |
 | `SESSION_SECRET` | Required; unique random value of at least 32 bytes; do not use the example placeholder | Backend runtime; **sensitive** |
@@ -39,14 +40,37 @@ Set backend variables in the hosting provider's **server-side secret/configurati
 | `TRUST_PROXY` | Optional; defaults to `0`. Behind a proxy, use only the actual trusted proxy IPs/CIDRs or supported narrow range names | Backend runtime; not sensitive |
 | `PRIVATE_STORAGE_DIR` | **Required in production**; absolute path to a mounted private storage directory outside frontend public/build directories | Backend runtime; path is not a secret, but reveals infrastructure details |
 | `PRIVATE_STORAGE_ORIGIN` | Optional; HTTPS origin for the supported private-file service; references must use the supported `/private/` path | Backend runtime; generally not sensitive |
-| `RAZORPAY_MODE` | Required in production; exactly `live`. Production rejects missing or `test` mode | Backend runtime; not sensitive |
-| `RAZORPAY_KEY_ID` | Required in production; live key ID with the expected `rzp_live_` prefix | Backend runtime; public identifier, but keep it out of frontend configuration |
-| `RAZORPAY_KEY_SECRET` | Required in production | Backend runtime; **sensitive** |
-| `RAZORPAY_WEBHOOK_SECRET` | Required in production because the webhook endpoint is enabled | Backend runtime; **sensitive** |
+| `RAZORPAY_MODE` | Staging: required, exactly `test`. Production: required, exactly `live`; production rejects missing or `test` mode | Backend runtime; not sensitive |
+| `RAZORPAY_KEY_ID` | Required when `APP_ENV=production`; live key ID with the expected `rzp_live_` prefix. Optional in staging; if configured there, it must use `rzp_test_` | Backend runtime; public identifier, but keep it out of frontend configuration |
+| `RAZORPAY_KEY_SECRET` | Required when `APP_ENV=production`; optional in staging while payments are disabled | Backend runtime; **sensitive** |
+| `RAZORPAY_WEBHOOK_SECRET` | Required when `APP_ENV=production` because webhook processing is enabled; optional in staging while webhooks are disabled | Backend runtime; **sensitive** |
 | `PUBLIC_SITE_URL` | Required for sitemap output; confirmed HTTPS site origin only, no path/query/credentials | Frontend build time; not sensitive; consumed by the Node build script, not exposed as a client `VITE_*` variable |
 | `API_PROXY_TARGET` | Optional development-only Vite proxy origin; defaults to `http://127.0.0.1:5000` | Frontend development environment; not used by production runtime or bundle |
 
-Use a cryptographically random session secret; for example, generate one with Node's `crypto.randomBytes(32)`. Do not paste it into chat, source code, or a frontend environment variable. Store live Razorpay values only in backend runtime configuration. The backend checks production mode, required credentials, live key ID prefix, HTTPS origin, session-secret length and proxy syntax before startup.
+Use a cryptographically random session secret; for example, generate one with Node's `crypto.randomBytes(32)`. Do not paste it into chat, source code, or a frontend environment variable. Store Razorpay values only in backend runtime configuration. The backend checks deployment lane, required credentials, key ID prefix, HTTPS origin, session-secret length and proxy syntax before startup.
+
+### Railway staging without a Razorpay account
+
+Use a separate staging service and a separate staging MongoDB database. Set `NODE_ENV=production` so production-runtime protections remain enabled (Secure cookies, HTTPS requirements, mounted private storage and production error handling), and set `APP_ENV=staging` to select the restricted staging payment lane. Set `RAZORPAY_MODE=test` explicitly. Staging rejects live mode and live-prefixed key IDs; it never falls back to live credentials.
+
+For the initial non-payment deployment, leave `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` and `RAZORPAY_WEBHOOK_SECRET` unset. Payment checkout and verification remain unavailable without the API key pair, and webhooks require both that API key pair and the webhook secret. Do not add placeholder credentials. If test payments are configured later, use only a complete Razorpay test key pair (`rzp_test_` key ID) and a test webhook secret, all in Railway backend variables. Captured access still requires the existing server-side signature and captured-payment checks.
+
+Also set the actual staging `MONGODB_URI`, unique `SESSION_SECRET`, frontend HTTPS `APP_ORIGIN`, absolute mounted `PRIVATE_STORAGE_DIR`, and provider-assigned `PORT`. Configure `TRUST_PROXY` only for a reviewed, trusted proxy value; do not set it to `true` or `*`. Never point staging at the production database or reuse production payment credentials.
+
+For Railway, configure these values in the backend service's Variables panel (supply actual staging-specific values privately):
+
+```text
+NODE_ENV=production
+APP_ENV=staging
+RAZORPAY_MODE=test
+MONGODB_URI=<staging MongoDB Atlas URI>
+SESSION_SECRET=<unique random secret, at least 32 bytes>
+APP_ORIGIN=<staging frontend HTTPS origin>
+PRIVATE_STORAGE_DIR=<absolute path on a mounted persistent volume>
+PORT=<Railway-provided port>
+```
+
+Do not set the three Razorpay credential variables until test credentials exist. Leave them unset rather than entering placeholders. Railway may provide `PORT`; the application reads that value.
 
 `PRIVATE_STORAGE_DIR` must now be explicitly set to an absolute path in production. This prevents the app from silently choosing its development fallback. The application can validate the path and ensure it is outside frontend static directories, but it cannot determine whether a hosting provider actually backs that path with durable storage; verify the mounted volume in the host dashboard.
 
@@ -101,7 +125,7 @@ Back up private PDFs separately from MongoDB and keep the file backup and databa
 
 ## 6. Deploy the backend
 
-1. Set backend environment variables in the host's secret/configuration panel. Use `NODE_ENV=production`, a verified HTTPS `APP_ORIGIN`, the target `MONGODB_URI`, unique `SESSION_SECRET`, explicit `PRIVATE_STORAGE_DIR`, `RAZORPAY_MODE=live`, and the three required Razorpay values when the payment operator is ready.
+1. Set backend environment variables in the host's secret/configuration panel. For a production deployment, use `NODE_ENV=production`, `APP_ENV=production`, a verified HTTPS `APP_ORIGIN`, the target `MONGODB_URI`, unique `SESSION_SECRET`, explicit `PRIVATE_STORAGE_DIR`, `RAZORPAY_MODE=live`, and the three required live Razorpay values. For pre-payment staging, follow the staging section above.
 2. Configure the host's trusted proxy addresses in `TRUST_PROXY` if TLS terminates before Node. The proxy must set/replace forwarded protocol and host headers. Do not set blanket trust.
 3. Install and start from `backend/`:
 

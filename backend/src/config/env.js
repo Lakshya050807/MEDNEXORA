@@ -9,6 +9,7 @@ const sessionMaxAgeDays = Number(process.env.SESSION_MAX_AGE_DAYS ?? '7');
 const appOriginValue = process.env.APP_ORIGIN ?? 'http://localhost:5173';
 const trustProxyValue = process.env.TRUST_PROXY ?? '0';
 const nodeEnv = process.env.NODE_ENV ?? 'development';
+const appEnv = process.env.APP_ENV ?? (nodeEnv === 'production' ? 'production' : nodeEnv);
 const configuredRazorpayMode = process.env.RAZORPAY_MODE;
 const razorpayMode = configuredRazorpayMode ?? 'test';
 const razorpayKeyId = process.env.RAZORPAY_KEY_ID ?? '';
@@ -33,6 +34,15 @@ if (frontendStaticDirectories.some((directory) => isWithinDirectory(directory, p
 if (!['development', 'test', 'production'].includes(nodeEnv)) {
   throw new Error('NODE_ENV must be development, test, or production.');
 }
+if (!['development', 'test', 'staging', 'production'].includes(appEnv)) {
+  throw new Error('APP_ENV must be development, test, staging, or production.');
+}
+if (nodeEnv === 'production' && !['staging', 'production'].includes(appEnv)) {
+  throw new Error('APP_ENV must be staging or production when NODE_ENV=production.');
+}
+if (['staging', 'production'].includes(appEnv) && nodeEnv !== 'production') {
+  throw new Error('NODE_ENV=production is required when APP_ENV=staging or production.');
+}
 if (nodeEnv === 'production' && !privateStorageDirValue) {
   throw new Error('Set PRIVATE_STORAGE_DIR to an explicit mounted storage path in production.');
 }
@@ -53,19 +63,22 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 if (!['test', 'live'].includes(razorpayMode)) {
   throw new Error('RAZORPAY_MODE must be either test or live.');
 }
-if (nodeEnv === 'production' && configuredRazorpayMode !== 'live') {
+if (appEnv === 'production' && configuredRazorpayMode !== 'live') {
   throw new Error('Set RAZORPAY_MODE=live explicitly in production.');
 }
-if (nodeEnv !== 'production' && razorpayMode !== 'test') {
-  throw new Error('Razorpay live mode is only allowed when NODE_ENV is production.');
+if (appEnv === 'staging' && configuredRazorpayMode !== 'test') {
+  throw new Error('Set RAZORPAY_MODE=test explicitly in staging.');
 }
-if (nodeEnv === 'production' && !razorpayKeyId.trim()) {
+if (!['production'].includes(appEnv) && razorpayMode !== 'test') {
+  throw new Error('Razorpay live mode is only allowed when APP_ENV is production.');
+}
+if (appEnv === 'production' && !razorpayKeyId.trim()) {
   throw new Error('RAZORPAY_KEY_ID must be configured in production.');
 }
-if (nodeEnv === 'production' && !razorpayKeySecret.trim()) {
+if (appEnv === 'production' && !razorpayKeySecret.trim()) {
   throw new Error('RAZORPAY_KEY_SECRET must be configured in production.');
 }
-if (nodeEnv === 'production' && !razorpayWebhookSecret.trim()) {
+if (appEnv === 'production' && !razorpayWebhookSecret.trim()) {
   throw new Error('RAZORPAY_WEBHOOK_SECRET must be configured in production.');
 }
 if (razorpayKeyId && razorpayMode === 'test' && !razorpayKeyId.startsWith('rzp_test_')) {
@@ -137,6 +150,7 @@ if (trustProxyValue !== 'false' && trustProxyValue !== '0' && trustProxyValue !=
 export const env = Object.freeze({
   port,
   nodeEnv,
+  appEnv,
   mongoUri: configuredMongoUri || 'mongodb://127.0.0.1:27017/nursing_education',
   sessionSecret,
   sessionMaxAgeMs: sessionMaxAgeDays * 24 * 60 * 60 * 1000,
