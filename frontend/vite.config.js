@@ -1,0 +1,18 @@
+import { defineConfig, loadEnv } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig(({ mode }) => {
+  const configEnv = loadEnv(mode, process.cwd(), '');
+  return {
+    plugins: [react()],
+    server: {
+      proxy: {
+        '/api': {
+          target: configEnv.API_PROXY_TARGET ?? process.env.API_PROXY_TARGET ?? 'http://127.0.0.1:5000',
+          changeOrigin: false,
+        },
+      },
+    },
+  };
+});
+

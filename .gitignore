@@ -1,0 +1,53 @@
+# Local working copies and generated packages
+/work/
+/outputs/
+/v11/
+
+# Dependencies and build/test output
+**/node_modules/
+**/.pnpm-store/
+**/dist/
+**/build/
+**/coverage/
+**/.vercel/
+
+# Private uploaded resources and storage
+**/private-files/
+
+# Environment files: keep examples available for source control
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local databases and database exports
+*.db
+*.sqlite
+*.sqlite3
+*.bson
+*.dump
+*.archive
+*.backup
+**/dump/
+**/dumps/
+
+# Logs and temporary files
+*.log
+*.log.*
+npm-debug.log*
+pnpm-debug.log*
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+**/.cache/
+**/tmp/
+**/temp/
+.DS_Store
+Thumbs.db
+

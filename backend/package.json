@@ -1,0 +1,28 @@
+{
+  "name": "nursing-learning-api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "admin:create": "node scripts/create-admin.js",
+    "admin:promote": "node scripts/promote-admin.js",
+    "exam:configure-primary": "node scripts/configure-primary-exam.js",
+    "course:setup-flagship": "node scripts/create-flagship-course.js",
+    "payments:reservations:backfill": "node scripts/backfill-purchase-reservations.js",
+    "db:study-material-text-index": "node scripts/migrate-study-material-text-index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "connect-mongo": "^6.0.0",
+    "dotenv": "^18.0.8",
+    "express": "^5.3.0",
+    "express-session": "^1.19.0",
+    "mongoose": "^9.11.2"
+  }
+}

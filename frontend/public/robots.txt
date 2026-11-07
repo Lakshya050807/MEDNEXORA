@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /student/dashboard
+Disallow: /my-courses
+Disallow: /orders
+Disallow: /cart
+Disallow: /practice
+Disallow: /practice/attempts
+# A Sitemap directive is added to the built file when PUBLIC_SITE_URL is configured.
