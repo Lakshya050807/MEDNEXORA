@@ -128,7 +128,12 @@ if (privateStorageOriginValue) {
 }
 
 let trustProxy = false;
-if (trustProxyValue !== 'false' && trustProxyValue !== '0' && trustProxyValue !== '') {
+if (trustProxyValue === '1') {
+  // Railway terminates HTTPS before forwarding a request to the Node process.
+  // Trust exactly the single ingress hop so express-session can honor
+  // X-Forwarded-Proto without trusting arbitrary client-supplied proxy headers.
+  trustProxy = 1;
+} else if (trustProxyValue !== 'false' && trustProxyValue !== '0' && trustProxyValue !== '') {
   const proxyRanges = trustProxyValue.split(',').map((entry) => entry.trim()).filter(Boolean);
   const namedRanges = new Set(['loopback', 'linklocal', 'uniquelocal']);
   const isValidRange = (range) => {
@@ -142,7 +147,7 @@ if (trustProxyValue !== 'false' && trustProxyValue !== '0' && trustProxyValue !=
     return prefixLength <= (version === 4 ? 32 : 128);
   };
   if (!proxyRanges.length || proxyRanges.some((range) => range.toLowerCase() === 'true' || range === '*' || !isValidRange(range))) {
-    throw new Error('TRUST_PROXY must be false or a comma-separated list of trusted IP addresses, CIDRs, or loopback/linklocal/uniquelocal ranges.');
+    throw new Error('TRUST_PROXY must be false, 1 for a single trusted proxy, or a comma-separated list of trusted IP addresses, CIDRs, or loopback/linklocal/uniquelocal ranges.');
   }
   trustProxy = proxyRanges;
 }

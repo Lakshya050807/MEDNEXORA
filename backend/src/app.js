@@ -47,6 +47,8 @@ export function createApp({
   privateStorageOrigin = env.privateStorageOrigin,
   privateStorageDir = env.privateStorageDir,
   privateAssetFetch = globalThis.fetch,
+  trustProxy = env.trustProxy,
+  secureCookies = env.secureCookies,
   paymentConfig = {
     keyId: env.razorpayKeyId,
     keySecret: env.razorpayKeySecret,
@@ -60,7 +62,7 @@ export function createApp({
 
   const app = express();
   app.disable('x-powered-by');
-  if (env.trustProxy) app.set('trust proxy', env.trustProxy);
+  if (trustProxy) app.set('trust proxy', trustProxy);
   app.use((_request, response, next) => {
     response.set('X-Content-Type-Options', 'nosniff');
     response.set('X-Frame-Options', 'DENY');
@@ -84,7 +86,7 @@ export function createApp({
     rolling: true,
     cookie: {
       httpOnly: true,
-      secure: env.secureCookies,
+      secure: secureCookies,
       sameSite: 'lax',
       maxAge: env.sessionMaxAgeMs,
       path: '/',

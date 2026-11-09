@@ -104,12 +104,17 @@ afterEach(async () => {
 });
 
 async function request(path, { method = 'GET', body, cookie, origin, fetchSite } = {}) {
+  return requestAt(baseUrl, path, { method, body, cookie, origin, fetchSite });
+}
+
+async function requestAt(url, path, { method = 'GET', body, cookie, origin, fetchSite, forwardedProto } = {}) {
   const headers = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (cookie) headers.Cookie = cookie;
   if (origin) headers.Origin = origin;
   if (fetchSite) headers['Sec-Fetch-Site'] = fetchSite;
-  const response = await fetch(`${baseUrl}${path}`, {
+  if (forwardedProto) headers['X-Forwarded-Proto'] = forwardedProto;
+  const response = await fetch(`${url}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -122,6 +127,33 @@ async function request(path, { method = 'GET', body, cookie, origin, fetchSite }
     cookie: setCookie ? setCookie.split(';')[0] : null,
     setCookie,
   };
+}
+
+function createAuthTestApp(overrides = {}) {
+  return createApp({
+    sessionStore: new session.MemoryStore(),
+    UserModel: FakeUserModel,
+    ProductModel: EmptyDashboardModel,
+    CourseModel: EmptyDashboardModel,
+    CourseProgressModel: EmptyDashboardModel,
+    TestAttemptModel: EmptyDashboardModel,
+    PurchasedAccessModel: EmptyDashboardModel,
+    OrderModel: EmptyDashboardModel,
+    QuestionBankModel: EmptyDashboardModel,
+    MockTestModel: EmptyDashboardModel,
+    SubjectModel: EmptyDashboardModel,
+    TopicModel: EmptyDashboardModel,
+    ...overrides,
+  });
+}
+
+async function listen(app) {
+  const instance = app.listen(0, '127.0.0.1');
+  await new Promise((resolve, reject) => {
+    instance.once('listening', resolve);
+    instance.once('error', reject);
+  });
+  return instance;
 }
 
 test('registration and login create a safe profile, access dashboard, and logout', async () => {
@@ -179,6 +211,49 @@ test('registration and login create a safe profile, access dashboard, and logout
   const dashboardAfterLogout = await request('/api/student/dashboard', { cookie: login.cookie });
   assert.equal(dashboardAfterLogout.response.status, 401, 'the destroyed session cannot reopen private dashboard data');
   assert.equal(dashboardAfterLogout.response.headers.get('cache-control'), 'no-store');
+});
+
+test('Secure student cookies are emitted behind Railway’s trusted HTTPS proxy and persist across profile refresh', async () => {
+  const details = { name: 'Asha Student', email: 'asha@example.com', password: 'careful-study-pass-42' };
+  const registration = await request('/api/auth/register', { method: 'POST', body: details });
+  assert.equal(registration.response.status, 201);
+
+  const untrustedServer = await listen(createAuthTestApp({ secureCookies: true, trustProxy: false }));
+  const untrustedUrl = `http://127.0.0.1:${untrustedServer.address().port}`;
+  try {
+    const missingProxyTrust = await requestAt(untrustedUrl, '/api/auth/login', {
+      method: 'POST', body: { email: details.email, password: details.password }, forwardedProto: 'https',
+    });
+    assert.equal(missingProxyTrust.response.status, 200);
+    assert.equal(missingProxyTrust.setCookie, null, 'express-session omits Secure cookies when the HTTPS proxy is not trusted');
+  } finally {
+    await new Promise((resolve, reject) => untrustedServer.close((error) => error ? reject(error) : resolve()));
+  }
+
+  const trustedServer = await listen(createAuthTestApp({ secureCookies: true, trustProxy: 1 }));
+  const trustedUrl = `http://127.0.0.1:${trustedServer.address().port}`;
+  try {
+    const login = await requestAt(trustedUrl, '/api/auth/login', {
+      method: 'POST', body: { email: details.email, password: details.password }, forwardedProto: 'https',
+    });
+    assert.equal(login.response.status, 200);
+    assert.ok(login.cookie);
+    assert.match(login.setCookie, /HttpOnly/i);
+    assert.match(login.setCookie, /Secure/i);
+    assert.match(login.setCookie, /SameSite=Lax/i);
+    assert.match(login.setCookie, /Path=\//i);
+    assert.doesNotMatch(login.setCookie, /Domain=/i);
+
+    const profile = await requestAt(trustedUrl, '/api/auth/me', { cookie: login.cookie, forwardedProto: 'https' });
+    assert.equal(profile.response.status, 200);
+    assert.equal(profile.body.user.email, details.email);
+
+    const refreshedDashboard = await requestAt(trustedUrl, '/api/student/dashboard', { cookie: login.cookie, forwardedProto: 'https' });
+    assert.equal(refreshedDashboard.response.status, 200);
+    assert.equal(refreshedDashboard.body.user.email, details.email);
+  } finally {
+    await new Promise((resolve, reject) => trustedServer.close((error) => error ? reject(error) : resolve()));
+  }
 });
 
 test('invalid credentials return the same safe authentication error', async () => {

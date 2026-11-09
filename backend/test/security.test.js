@@ -46,7 +46,7 @@ test('production configuration rejects blanket proxy trust and requires HTTPS fr
     cwd: process.cwd(), env: baseEnv, encoding: 'utf8',
   });
   assert.notEqual(rejectedProxy.status, 0);
-  assert.match(rejectedProxy.stderr, /TRUST_PROXY must be false or a comma-separated list/u);
+  assert.match(rejectedProxy.stderr, /TRUST_PROXY must be false, 1 for a single trusted proxy/u);
 
   const rejectedHttpOrigin = spawnSync(process.execPath, ['--input-type=module', '-e', "await import('./src/config/env.js')"], {
     cwd: process.cwd(), env: { ...baseEnv, TRUST_PROXY: 'false', APP_ORIGIN: 'http://nursing.example.test' }, encoding: 'utf8',
@@ -72,6 +72,17 @@ test('production configuration rejects blanket proxy trust and requires HTTPS fr
     cwd: process.cwd(), env: { ...baseEnv, TRUST_PROXY: '127.0.0.1,10.0.0.0/8' }, encoding: 'utf8',
   });
   assert.equal(acceptedProxy.status, 0, acceptedProxy.stderr);
+
+  const acceptedSingleProxy = spawnSync(process.execPath, ['--input-type=module', '-e', "const { env } = await import('./src/config/env.js'); if (env.trustProxy !== 1 || env.secureCookies !== true || env.sessionCookieName !== '__Host-nursing.sid') process.exit(2)"], {
+    cwd: process.cwd(), env: { ...baseEnv, TRUST_PROXY: '1' }, encoding: 'utf8',
+  });
+  assert.equal(acceptedSingleProxy.status, 0, acceptedSingleProxy.stderr);
+
+  const rejectedHopCount = spawnSync(process.execPath, ['--input-type=module', '-e', "await import('./src/config/env.js')"], {
+    cwd: process.cwd(), env: { ...baseEnv, TRUST_PROXY: '2' }, encoding: 'utf8',
+  });
+  assert.notEqual(rejectedHopCount.status, 0);
+  assert.match(rejectedHopCount.stderr, /TRUST_PROXY must be false, 1 for a single trusted proxy/u);
 });
 
 test('production configuration requires an explicit absolute private storage path', () => {

@@ -60,10 +60,11 @@ test('authentication and dashboard requests bypass the browser HTTP cache', asyn
     });
   });
 
+  await authApi.login({ email: 'student@example.test', password: 'test-password' });
   await authApi.currentUser();
   await authApi.studentDashboard();
 
-  assert.deepEqual(calls.map((call) => call.url), ['/api/auth/me', '/api/student/dashboard']);
+  assert.deepEqual(calls.map((call) => call.url), ['/api/auth/login', '/api/auth/me', '/api/student/dashboard']);
   assert.ok(calls.every((call) => call.options.cache === 'no-store'));
   assert.ok(calls.every((call) => call.options.credentials === 'same-origin'));
 });
