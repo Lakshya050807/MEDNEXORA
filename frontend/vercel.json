@@ -5,6 +5,10 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
+      "source": "^/api/(.*)$",
+      "destination": "https://mednexora-production-f06e.up.railway.app/api/$1"
+    },
+    {
       "source": "/((?!api).*)",
       "destination": "/index.html"
     }
