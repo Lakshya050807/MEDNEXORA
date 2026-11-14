@@ -5,6 +5,9 @@ const isOptionalSafeInteger = (value) => value === null || Number.isSafeInteger(
 const lessonSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true, minlength: 2, maxlength: 200 },
   description: { type: String, trim: true, maxlength: 2000, default: '' },
+  // Plain text lesson content is returned only by the authenticated lesson
+  // endpoint after the student's course entitlement has been checked.
+  contentText: { type: String, trim: true, maxlength: 30000, default: '' },
   durationMinutes: { type: Number, min: 0, max: 10000, default: null, validate: isOptionalSafeInteger },
   videoProvider: { type: String, enum: ['youtube', 'vimeo', 'private-hosted', 'other', 'none'], default: 'none' },
   videoAssetId: {

@@ -416,6 +416,15 @@ export function createCatalogController({ ProductModel, ExamModel, SubjectModel,
   const validateQuestionBank = async (data) => {
     if (data.product === '') data.product = null;
     if (!data.exam || !data.subject) return;
+    if (data.publicationStatus === 'published') {
+      if (!(data.questions ?? []).length) throw relationError('A published question bank must contain at least one question.');
+      for (const [index, question] of (data.questions ?? []).entries()) {
+        if (!String(question.prompt ?? '').trim() || !Array.isArray(question.options) || question.options.length !== 4 || question.options.some((option) => !String(option ?? '').trim())
+          || !Number.isInteger(question.correctAnswerIndex) || question.correctAnswerIndex < 0 || question.correctAnswerIndex > 3) {
+          throw relationError(`Question ${index + 1} must have a prompt, four non-empty options, and one correct answer before publication.`);
+        }
+      }
+    }
     const [exam, subject] = await Promise.all([
       ExamModel.findById(referenceId(data.exam)).select('publicationStatus'),
       SubjectModel.findById(referenceId(data.subject)).select('exam publicationStatus'),
@@ -428,7 +437,15 @@ export function createCatalogController({ ProductModel, ExamModel, SubjectModel,
       if (data.publicationStatus === 'published' && product.publicationStatus !== 'published') throw relationError('Publish the access product before publishing this question bank.');
     }
     const topicIds = [...new Set((data.questions ?? []).map((question) => question.topic?._id ?? question.topic).filter(Boolean).map(String))];
-    if (topicIds.length && await TopicModel.countDocuments({ _id: { $in: topicIds }, exam: referenceId(data.exam), subject: referenceId(data.subject) }) !== topicIds.length) throw relationError('Every question topic must belong to the selected examination and subject.');
+    if (topicIds.length) {
+      const topicFilter = { _id: { $in: topicIds }, exam: referenceId(data.exam), subject: referenceId(data.subject) };
+      if (data.publicationStatus === 'published') topicFilter.publicationStatus = 'published';
+      if (await TopicModel.countDocuments(topicFilter) !== topicIds.length) {
+        throw relationError(data.publicationStatus === 'published'
+          ? 'Every question topic must be published under the selected examination and subject before publishing this bank.'
+          : 'Every question topic must belong to the selected examination and subject.');
+      }
+    }
   };
   const questionBankAdmin = adminHandlers(QuestionBankModel, 'questionBank', validateQuestionBank);
   const validateCourse = async (data) => {

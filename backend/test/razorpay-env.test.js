@@ -124,6 +124,12 @@ test('staging runs with production runtime safeguards and no Razorpay credential
 });
 
 test('staging requires explicit test mode and rejects live mode or live credentials', () => {
+  const wrongRuntime = runEnvironment({
+    overrides: { NODE_ENV: 'development', APP_ENV: 'staging', RAZORPAY_MODE: 'test' },
+  });
+  assert.notEqual(wrongRuntime.status, 0);
+  assert.match(wrongRuntime.stderr, /NODE_ENV=production is required when APP_ENV=staging/u);
+
   const liveMode = runEnvironment({
     overrides: { APP_ENV: 'staging', RAZORPAY_MODE: 'live', RAZORPAY_KEY_ID: 'rzp_live_example-key-id' },
   });
@@ -155,6 +161,7 @@ test('production cannot be downgraded to staging runtime settings by an inconsis
 test('checkout, payment verification, reconciliation, and webhook are unavailable without credentials', async () => {
   const controller = createPaymentController({
     paymentConfig: { mode: 'test', keyId: '', keySecret: '', webhookSecret: 'configured-test-webhook-secret' },
+    paidPurchasesEnabled: true,
     gateway: {},
   });
   const capture = () => ({

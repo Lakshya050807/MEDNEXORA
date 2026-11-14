@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import Icon from '../components/Icon.jsx';
 import SiteHeader from '../components/SiteHeader.jsx';
 import SiteFooter from '../components/SiteFooter.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
 import { formatPricePaise } from '../data/catalog.js';
 import { courseApi } from '../services/courseApi.js';
 
@@ -10,12 +11,16 @@ function orderedLessons(course) {
 }
 
 export default function CourseDetailPage({ courseId }) {
+  const { user } = useAuth();
   const [course, setCourse] = useState(null);
   const [state, setState] = useState('loading');
   const [error, setError] = useState('');
   const [previewLessonId, setPreviewLessonId] = useState('');
   const [playback, setPlayback] = useState(null);
   const [previewState, setPreviewState] = useState('idle');
+  const [enrollmentState, setEnrollmentState] = useState('checking');
+  const [enrollmentError, setEnrollmentError] = useState('');
+  const [enrolling, setEnrolling] = useState(false);
   const [retry, setRetry] = useState(0);
 
   useEffect(() => {
@@ -32,6 +37,40 @@ export default function CourseDetailPage({ courseId }) {
     });
     return () => controller.abort();
   }, [courseId, retry]);
+
+  useEffect(() => {
+    if (!course) return;
+    if (!user) {
+      setEnrollmentState('anonymous');
+      return;
+    }
+    const controller = new AbortController();
+    setEnrollmentState('checking');
+    courseApi.myCourses({ signal: controller.signal }).then((result) => {
+      const enrolled = (result.items ?? []).some((item) => String(item.id) === String(course.id));
+      setEnrollmentState(enrolled ? 'enrolled' : 'not-enrolled');
+    }).catch((requestError) => {
+      if (requestError?.name === 'AbortError') return;
+      setEnrollmentError(requestError.message || 'Your course access could not be checked.');
+      setEnrollmentState(requestError.status === 401 ? 'anonymous' : 'error');
+    });
+    return () => controller.abort();
+  }, [course?.id, user?.id]);
+
+  const enrollForFree = async () => {
+    if (!course) return;
+    setEnrolling(true);
+    setEnrollmentError('');
+    try {
+      await courseApi.enroll(course.id);
+      setEnrollmentState('enrolled');
+    } catch (requestError) {
+      setEnrollmentError(requestError.message || 'Free enrollment could not be completed.');
+      if (requestError.status === 401) setEnrollmentState('anonymous');
+    } finally {
+      setEnrolling(false);
+    }
+  };
 
   const startPreview = async (lesson) => {
     setPreviewLessonId(lesson.id);
@@ -55,7 +94,8 @@ export default function CourseDetailPage({ courseId }) {
   const lessons = orderedLessons(course);
   const previews = lessons.filter((lesson) => lesson.isPreview);
   const continueUrl = `/courses/${encodeURIComponent(course.id)}/learn`;
-  const loginNext = encodeURIComponent(continueUrl);
+  const loginNext = encodeURIComponent(`/courses/${course.id}`);
+  const hasAccess = enrollmentState === 'enrolled';
 
   return (
     <div className="site-shell">
@@ -71,7 +111,18 @@ export default function CourseDetailPage({ courseId }) {
               <p>{product.description}</p>
               <div className="course-detail-meta">{course.lessonCount > 0 ? <span><Icon name="play" size={16} /> {course.lessonCount} lessons</span> : <span>Course outline in progress</span>}{course.durationMinutes && <span>{course.durationMinutes} minutes</span>}<span>{course.subjects?.length || 0} subjects</span></div>
               {course.subjects?.length > 0 && <div className="course-subject-tags">{course.subjects.map((subject) => <span key={subject.id}>{subject.name || 'Subject'}</span>)}</div>}
-              <div className="course-detail-action-row"><strong>{product.isFree ? 'Free' : formatPricePaise(product.currentPricePaise)}</strong>{product.isFree ? <a className="course-primary-link" href={`/login?next=${loginNext}`}>Start this course <Icon name="arrow" size={16} /></a> : <div className="course-purchase-actions"><a className="course-primary-link" href={`/products/${encodeURIComponent(product.slug || product.id)}`}>Purchase course <Icon name="arrow" size={16} /></a><a className="course-secondary-link" href="/my-courses">Already enrolled?</a></div>}</div>
+              <div className="course-detail-action-row"><strong>{product.isFree ? 'Free' : formatPricePaise(product.currentPricePaise)}</strong>
+                {hasAccess
+                  ? <a className="course-primary-link" href={continueUrl}>Continue learning <Icon name="arrow" size={16} /></a>
+                  : product.isFree
+                    ? user
+                      ? <button className="course-primary-link" type="button" disabled={enrolling || enrollmentState === 'checking'} onClick={() => void enrollForFree()}>{enrolling ? 'Enrolling…' : enrollmentState === 'checking' ? 'Checking access…' : 'Enroll for free'} <Icon name="arrow" size={16} /></button>
+                      : <a className="course-primary-link" href={`/login?next=${loginNext}`}>Log in to enroll <Icon name="arrow" size={16} /></a>
+                    : enrollmentState === 'checking'
+                      ? <button className="course-primary-link" type="button" disabled>Checking access…</button>
+                      : <a className="course-primary-link" href={`/products/${encodeURIComponent(product.slug || product.id)}`}>Purchase course <Icon name="arrow" size={16} /></a>}
+              </div>
+              {enrollmentError && <p className="course-access-note course-access-inline" role="alert">{enrollmentError}</p>}
               {!product.isFree && <p className="course-access-note course-access-inline"><Icon name="shield" size={15} /> Paid access is granted only after purchase verification and server-side entitlement confirmation.</p>}
             </div>
           </section>
@@ -93,7 +144,7 @@ export default function CourseDetailPage({ courseId }) {
                 {playback?.available && previewState === 'ready' ? <div className="course-video-frame"><iframe src={playback.embedUrl} title={playback.lessonTitle || 'Free course preview'} sandbox="allow-scripts allow-same-origin allow-presentation" allow="accelerometer; autoplay; encrypted-media; picture-in-picture" referrerPolicy="strict-origin-when-cross-origin" allowFullScreen /></div> : <div className="course-player-placeholder"><Icon name={previewState === 'loading' ? 'spark' : 'play'} size={26} /><p>{previewState === 'loading' ? 'Loading the configured preview…' : previewState !== 'idle' ? playback?.message || 'The preview could not be loaded.' : previews.length ? 'Select a lesson marked Preview to check its configured player.' : 'No free preview lesson has been configured.'}</p></div>}
                 {previews.length > 0 && <p className="course-preview-caption">{previews.length} free preview {previews.length === 1 ? 'lesson is' : 'lessons are'} configured for this course.</p>}
               </section>
-              <section className="course-outline-panel course-highlights-panel"><p className="eyebrow">COURSE OVERVIEW</p><h2>Preparation highlights</h2>{course.targetAudience && <p>For: {course.targetAudience}</p>}{course.outline?.length ? <ul>{course.outline.map((item, index) => <li key={`${index}-${item}`}><Icon name="checklist" size={15} />{item}</li>)}</ul> : <p>Course highlights have not been added yet.</p>}<a className="course-secondary-link" href={`/login?next=${loginNext}`}>Sign in to continue learning <Icon name="arrow" size={15} /></a></section>
+              <section className="course-outline-panel course-highlights-panel"><p className="eyebrow">COURSE OVERVIEW</p><h2>Preparation highlights</h2>{course.targetAudience && <p>For: {course.targetAudience}</p>}{course.outline?.length ? <ul>{course.outline.map((item, index) => <li key={`${index}-${item}`}><Icon name="checklist" size={15} />{item}</li>)}</ul> : <p>Course highlights have not been added yet.</p>}{hasAccess ? <a className="course-secondary-link" href={continueUrl}>Open learning space <Icon name="arrow" size={15} /></a> : user ? <p>Use the course action above to enroll or purchase access.</p> : <a className="course-secondary-link" href={`/login?next=${loginNext}`}>Sign in to continue learning <Icon name="arrow" size={15} /></a>}</section>
             </aside>
           </div>
         </div>

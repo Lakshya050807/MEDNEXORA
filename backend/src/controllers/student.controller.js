@@ -68,6 +68,19 @@ function isPublishedCatalogueProduct(product) {
     && topics.every(isPublishedTopic);
 }
 
+function isPublishedConfiguredCourseProduct(product, course) {
+  if (!courseTypes.has(product?.resourceType) || !course || course.publicationStatus !== 'published'
+    || course.courseType !== product.resourceType || !Array.isArray(course.subjects) || course.subjects.length === 0) return false;
+  const productExam = product.exam;
+  const courseExam = course.exam;
+  if (!productExam || typeof productExam !== 'object' || productExam.publicationStatus !== 'published'
+    || !courseExam || typeof courseExam !== 'object' || courseExam.publicationStatus !== 'published'
+    || idOf(productExam) !== idOf(courseExam)) return false;
+  return course.subjects.every((subject) => subject && typeof subject === 'object'
+    && subject.publicationStatus === 'published'
+    && (!subject.exam || idOf(subject.exam) === idOf(courseExam)));
+}
+
 const topicPopulate = {
   path: 'topic',
   select: 'name publicationStatus chapter',
@@ -233,12 +246,25 @@ export function createStudentController({
     const freeAccessProductIds = idSet(freeAccessRows.map((access) => access.product));
     const libraryProductIds = new Set([...purchasedProductIds, ...freeAccessProductIds]);
 
-    const purchasedProducts = libraryProductIds.size
-      ? (await queryRows(ProductModel.find({ _id: { $in: [...libraryProductIds] }, publicationStatus: 'published' }), {
+    const accessibleProducts = libraryProductIds.size
+      ? await queryRows(ProductModel.find({ _id: { $in: [...libraryProductIds] }, publicationStatus: 'published' }), {
         select: '+contentUrl title description detailedDescription category language fileSizeBytes format thumbnailUrl resourceType pricePaise discountPaise currentPricePaise subject chapter topic topics exam updatedAt publicationStatus',
         populate: ['subject', 'chapter', topicPopulate, topicsPopulate, examPopulate],
-      })).filter(isPublishedCatalogueProduct)
+      })
       : [];
+    const accessibleCourseProductIds = idSet(accessibleProducts
+      .filter((product) => courseTypes.has(product.resourceType)));
+    const configuredCourses = accessibleCourseProductIds.size
+      ? await queryRows(CourseModel.find({ product: { $in: [...accessibleCourseProductIds] }, publicationStatus: 'published' }), {
+        populate: [
+          { path: 'exam', select: '_id publicationStatus' },
+          { path: 'subjects', select: '_id exam publicationStatus' },
+        ],
+      })
+      : [];
+    const configuredCourseByProductId = new Map(configuredCourses.map((course) => [idOf(course.product), course]));
+    const purchasedProducts = accessibleProducts.filter((product) => isPublishedCatalogueProduct(product)
+      || isPublishedConfiguredCourseProduct(product, configuredCourseByProductId.get(idOf(product))));
     const productById = new Map(purchasedProducts.map((product) => [idOf(product), product]));
     const accessByProduct = new Map([...paidAccessRows, ...freeAccessRows].map((access) => [idOf(access.product), access]));
     const visibleFreeProducts = freeProducts.filter(isPublishedCatalogueProduct);

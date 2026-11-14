@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { serializeProduct } from './catalog.controller.js';
 import { materialCategories, resourceTypes } from '../models/StudyMaterial.js';
+import { calculateContentReadiness } from '../services/contentReadiness.js';
 
 function parsePage(value, fallback, max) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -144,13 +145,30 @@ export function createAdminController({ UserModel, OrderModel, RefundModel, Prod
     subjects: buildEntityList(SubjectModel, { searchFields: ['name', 'description'], populate: [{ path: 'exam', select: 'name slug' }] }),
     chapters: buildEntityList(ChapterModel, { searchFields: ['name', 'description'], populate: [{ path: 'exam', select: 'name slug' }, { path: 'subject', select: 'name slug' }] }),
     topics: buildEntityList(TopicModel, { searchFields: ['name', 'description'], populate: [{ path: 'exam', select: 'name slug' }, { path: 'subject', select: 'name slug' }, { path: 'chapter', select: 'name slug' }] }),
-    courses: buildEntityList(CourseModel, { searchFields: ['courseType', 'outline'], populate: [{ path: 'product', select: 'title slug resourceType publicationStatus' }, { path: 'exam', select: 'name slug' }, { path: 'subjects', select: 'name slug' }] }),
+    courses: buildEntityList(CourseModel, { searchFields: ['courseType', 'outline'], populate: [{ path: 'product', select: 'title slug description detailedDescription thumbnailUrl pricePaise discountPaise currentPricePaise resourceType publicationStatus' }, { path: 'exam', select: 'name slug publicationStatus' }, { path: 'subjects', select: 'name slug publicationStatus exam' }] }),
     questionBanks: buildEntityList(QuestionBankModel, { searchFields: ['title'], populate: [{ path: 'exam', select: 'name slug' }, { path: 'subject', select: 'name slug' }, { path: 'product', select: 'title slug publicationStatus currentPricePaise' }] }),
     mockTests: buildEntityList(MockTestModel, { searchFields: ['title'], populate: [{ path: 'exam', select: 'name slug' }, { path: 'product', select: 'title slug resourceType publicationStatus' }, { path: 'questionBanks', select: 'title publicationStatus' }] }),
   };
 
+  const readContentReadiness = async () => {
+    const load = (Model, projection) => Model?.find
+      ? Model.find({}).select(projection).lean()
+      : Promise.resolve([]);
+    const [exams, subjects, chapters, topics, courses, studyMaterials, questionBanks, mockTests] = await Promise.all([
+      load(ExamModel, '_id name publicationStatus'),
+      load(SubjectModel, '_id name exam publicationStatus'),
+      load(ChapterModel, '_id name exam subject publicationStatus'),
+      load(TopicModel, '_id name exam subject chapter publicationStatus'),
+      load(CourseModel, '_id exam product subjects publicationStatus modules.subject modules.chapter modules.lessons._id modules.lessons.title modules.lessons.contentText modules.lessons.videoProvider modules.lessons.videoAssetId modules.lessons.topic modules.lessons.publicationStatus'),
+      load(ProductModel, '_id title resourceType publicationStatus exam subject chapter topic topics course'),
+      load(QuestionBankModel, '_id title exam subject publicationStatus questions._id questions.options questions.correctAnswerIndex questions.explanation questions.topic'),
+      load(MockTestModel, '_id title product exam questionBanks questionCount publicationStatus'),
+    ]);
+    return calculateContentReadiness({ exams, subjects, chapters, topics, courses, studyMaterials, questionBanks, mockTests });
+  };
+
   return {
-    overview: async (_request, response, next) => {
+    overview: async (request, response, next) => {
       try {
         const [productCount, publishedProductCount, studyMaterialCount, courseCount, publishedCourseCount, draftCourseCount, questionBankCount, mockTestCount, studentCount, orderCount, verifiedRevenue] = await Promise.all([
           ProductModel.countDocuments({}),
@@ -169,7 +187,7 @@ export function createAdminController({ UserModel, OrderModel, RefundModel, Prod
           ]),
         ]);
         const revenue = verifiedRevenue[0] ?? { amountPaise: 0, orderCount: 0 };
-        return response.status(200).json({
+        const result = {
           metrics: {
             productCount,
             publishedProductCount,
@@ -184,7 +202,12 @@ export function createAdminController({ UserModel, OrderModel, RefundModel, Prod
             verifiedRevenuePaise: revenue.amountPaise ?? 0,
             verifiedPaidOrderCount: revenue.orderCount ?? 0,
           },
-        });
+        };
+        if (request.query.includeContentReadiness === 'true') {
+          try { result.contentReadiness = await readContentReadiness(); }
+          catch { result.contentReadinessError = 'Content readiness could not be calculated. Please try again.'; }
+        }
+        return response.status(200).json(result);
       } catch (error) { return next(error); }
     },
     ...queryHandlers,
@@ -339,6 +362,41 @@ export function createAdminController({ UserModel, OrderModel, RefundModel, Prod
           );
         }
         return response.status(200).json({ orderId: String(updated._id), decision: updated.refundReviewStatus, status: updated.status });
+      } catch (error) { return next(error); }
+    },
+    deleteCourseLesson: async (request, response, next) => {
+      try {
+        const { courseId, lessonId } = request.params;
+        if (!mongoose.isValidObjectId(courseId) || !mongoose.isValidObjectId(lessonId)) {
+          return response.status(400).json({ message: 'Enter valid course and lesson IDs.' });
+        }
+        if (!CourseProgressModel?.countDocuments) {
+          return response.status(503).json({ message: 'Lesson deletion is unavailable until course progress checks are configured.' });
+        }
+        const course = await CourseModel.findById(courseId);
+        if (!course) return response.status(404).json({ message: 'The course could not be found.' });
+        if (course.publicationStatus !== 'draft') {
+          return response.status(409).json({ message: 'Lessons in a published or archived course cannot be deleted. Unpublish the course first, or archive the lesson to preserve student history.' });
+        }
+        let targetModule = null;
+        let targetLesson = null;
+        for (const module of course.modules ?? []) {
+          const lesson = module.lessons?.id?.(lessonId) ?? module.lessons?.find?.((item) => String(item._id) === String(lessonId));
+          if (lesson) { targetModule = module; targetLesson = lesson; break; }
+        }
+        if (!targetLesson) return response.status(404).json({ message: 'The lesson could not be found in this course.' });
+        const progress = await CourseProgressModel.countDocuments({
+          course: course._id,
+          $or: [{ completedLessonIds: targetLesson._id }, { lastLessonId: targetLesson._id }],
+        });
+        if (progress > 0) {
+          return response.status(409).json({ message: 'This lesson is referenced by saved student progress. Archive it instead to preserve those records.' });
+        }
+        if (targetModule.lessons?.pull) targetModule.lessons.pull(targetLesson._id);
+        else targetModule.lessons = (targetModule.lessons ?? []).filter((item) => String(item._id) !== String(targetLesson._id));
+        course.lessonCount = (course.modules ?? []).reduce((count, module) => count + (module.lessons?.length ?? 0), 0);
+        await course.save();
+        return response.status(200).json({ message: 'The lesson was deleted.', courseId: String(course._id), lessonCount: course.lessonCount });
       } catch (error) { return next(error); }
     },
   };

@@ -10,6 +10,8 @@
 **/build/
 **/coverage/
 **/.vercel/
+**/playwright-report/
+**/test-results/
 
 # Private uploaded resources and storage
 **/private-files/

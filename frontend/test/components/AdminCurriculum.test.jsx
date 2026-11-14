@@ -7,7 +7,7 @@ import { adminApi } from '../../src/services/adminApi.js';
 vi.mock('../../src/services/adminApi.js', () => ({
   adminApi: {
     list: vi.fn(), overview: vi.fn(), profile: vi.fn(), login: vi.fn(), logout: vi.fn(), changePassword: vi.fn(),
-    create: vi.fn(), update: vi.fn(), remove: vi.fn(), uploadPdf: vi.fn(),
+    create: vi.fn(), update: vi.fn(), remove: vi.fn(), removeCourseLesson: vi.fn(), uploadPdf: vi.fn(),
   },
   formatRupees: (value) => `₹${value}`,
 }));
@@ -117,6 +117,34 @@ describe('Admin curriculum interface', () => {
         lessons: [expect.objectContaining({ _id: 'lesson-1', topic: 'topic-1' })],
       })],
     }));
+  });
+
+  it('adds a plain-text lesson in the selected module as a draft through the existing course API', async () => {
+    renderCurriculum();
+    const module = screen.getAllByText('Existing module').find((element) => element.closest('.admin-course-module-card'))?.closest('.admin-course-module-card');
+    fireEvent.click(within(module).getByRole('button', { name: 'Add lesson' }));
+    fireEvent.change(screen.getByLabelText('Lesson title'), { target: { value: 'Administrator authored lesson' } });
+    fireEvent.change(screen.getByLabelText('Topic (optional)'), { target: { value: 'topic-1' } });
+    fireEvent.change(screen.getByLabelText('Lesson text'), { target: { value: 'Reviewed text entered by the course administrator.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add lesson as draft' }));
+
+    await vi.waitFor(() => expect(adminApi.update).toHaveBeenCalledWith('courses', 'course-1', {
+      modules: [expect.objectContaining({
+        _id: 'module-1',
+        lessons: expect.arrayContaining([expect.objectContaining({
+          title: 'Administrator authored lesson', topic: 'topic-1', contentText: 'Reviewed text entered by the course administrator.', publicationStatus: 'draft',
+        })]),
+      })],
+    }));
+  });
+
+  it('uses the protected course lesson deletion endpoint for saved lessons', async () => {
+    adminApi.removeCourseLesson.mockResolvedValue({ message: 'The lesson was deleted.' });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    renderCurriculum();
+    const module = screen.getAllByText('Existing module').find((element) => element.closest('.admin-course-module-card'))?.closest('.admin-course-module-card');
+    fireEvent.click(within(module).getByRole('button', { name: 'Delete' }));
+    await vi.waitFor(() => expect(adminApi.removeCourseLesson).toHaveBeenCalledWith('course-1', 'lesson-1'));
   });
 
   it('does not offer subject deletion and surfaces server hierarchy errors', async () => {

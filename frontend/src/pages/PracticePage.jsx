@@ -19,14 +19,15 @@ function StateCard({ title, message, error, onRetry }) {
 }
 
 function PracticeHub() {
+  const initialFilters = new URLSearchParams(window.location.search);
   const [banks, setBanks] = useState([]);
   const [tests, setTests] = useState([]);
   const [exams, setExams] = useState([]);
   const [subjects, setSubjects] = useState([]);
   const [topics, setTopics] = useState([]);
-  const [examId, setExamId] = useState('');
-  const [subjectId, setSubjectId] = useState('');
-  const [topicId, setTopicId] = useState('');
+  const [examId, setExamId] = useState(() => initialFilters.get('examId') ?? '');
+  const [subjectId, setSubjectId] = useState(() => initialFilters.get('subjectId') ?? '');
+  const [topicId, setTopicId] = useState(() => initialFilters.get('topicId') ?? '');
   const [status, setStatus] = useState('loading');
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
@@ -315,6 +316,7 @@ export function AttemptRunner({ attemptId }) {
         <h2>{question.prompt}</h2>
         <QuestionImage key={question.id} image={question.image} questionNumber={currentIndex + 1} />
         <div className="practice-options">{question.options.map((option, index) => <button key={`${question.id}-${index}`} className={`practice-option ${question.selectedOptionIndex === index ? 'is-selected' : ''}`} type="button" aria-pressed={question.selectedOptionIndex === index} disabled={saving || submitting} onClick={() => void updateQuestion(question, { selectedOptionIndex: index })}><span>{String.fromCharCode(65 + index)}</span>{option}</button>)}</div>
+        {attempt.mode === 'practice' && question.review && <div className={`practice-feedback${question.review.isCorrect ? '' : ' is-incorrect'}`} role="status"><strong>{question.review.isCorrect ? 'Correct answer.' : 'That answer is not correct.'}</strong>{question.review.explanation && <p>{question.review.explanation}</p>}</div>}
         <div className="practice-question-actions">
           <div className="practice-question-control-group">
             <button className="secondary-button" type="button" disabled={saving || submitting} onClick={() => void updateQuestion(question, { selectedOptionIndex: null })}>Clear response</button>

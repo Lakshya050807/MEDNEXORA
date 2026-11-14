@@ -12,9 +12,14 @@ test('Vercel builds the frontend and rewrites SPA routes without swallowing rela
   assert.equal(config.installCommand, 'npm ci');
   assert.equal(config.buildCommand, 'npm run build');
   assert.equal(config.outputDirectory, 'dist');
-  assert.equal(config.rewrites.length, 1);
+  assert.equal(config.rewrites.length, 2);
 
-  const spaRewrite = config.rewrites[0];
+  const [apiRewrite, spaRewrite] = config.rewrites;
+  assert.deepEqual(apiRewrite, {
+    source: '/api/:path*',
+    destination: 'https://mednexora-production-f06e.up.railway.app/api/:path*',
+  });
+
   const sourcePattern = new RegExp(`^${spaRewrite.source}$`);
   assert.equal(spaRewrite.destination, '/index.html');
   assert.equal(sourcePattern.test('/products/example-id'), true);

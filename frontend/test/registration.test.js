@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { authApi, AuthApiError } from '../src/services/authApi.js';
 import { registrationErrorMessage, validateRegistration } from '../src/utils/registrationValidation.js';
+import { postAuthenticationPath } from '../src/utils/authRedirect.js';
 
 const validDetails = {
   name: 'Riya Student',
@@ -48,6 +49,13 @@ test('registration error fallback is safe when an unexpected response has no mes
     assert.equal(registrationErrorMessage(error), 'Something went wrong. Please try again later.');
     return true;
   });
+});
+
+test('post-authentication redirects safely return students to the requested course', () => {
+  const courseId = '507f1f77bcf86cd799439201';
+  assert.equal(postAuthenticationPath(`?next=${encodeURIComponent(`/courses/${courseId}`)}`), `/courses/${courseId}`);
+  assert.equal(postAuthenticationPath(`?next=${encodeURIComponent(`/courses/${courseId}/learn`)}`), `/courses/${courseId}/learn`);
+  assert.equal(postAuthenticationPath('?next=https%3A%2F%2Fevil.example'), '/student/dashboard');
 });
 
 test('authentication and dashboard requests bypass the browser HTTP cache', async (t) => {

@@ -49,6 +49,10 @@ export function createApp({
   privateAssetFetch = globalThis.fetch,
   trustProxy = env.trustProxy,
   secureCookies = env.secureCookies,
+  launchConfig = {
+    registrationEnabled: env.publicRegistrationEnabled,
+    paidPurchasesEnabled: env.paidPurchasesEnabled,
+  },
   paymentConfig = {
     keyId: env.razorpayKeyId,
     keySecret: env.razorpayKeySecret,
@@ -77,6 +81,13 @@ export function createApp({
       if (request.originalUrl?.split('?')[0] === '/api/payments/webhook') request.rawBody = Buffer.from(buffer);
     },
   }));
+  app.get('/api/launch/status', (_request, response) => {
+    response.set('Cache-Control', 'no-store');
+    return response.status(200).json({
+      registrationEnabled: launchConfig.registrationEnabled === true,
+      paidPurchasesEnabled: launchConfig.paidPurchasesEnabled === true,
+    });
+  });
   app.use('/api/health', healthRoutes);
   const sessionOptions = {
     secret: env.sessionSecret,
@@ -98,7 +109,7 @@ export function createApp({
   app.use('/api/auth', (_request, response, next) => {
     response.set('Cache-Control', 'no-store');
     next();
-  }, studentSession, createAuthRoutes({ UserModel }));
+  }, studentSession, createAuthRoutes({ UserModel, registrationEnabled: launchConfig.registrationEnabled === true }));
   const practiceModels = { UserModel, QuestionBankModel, MockTestModel, ProductModel, PurchasedAccessModel, TestAttemptModel, ExamModel, SubjectModel, TopicModel, ChapterModel };
   app.use('/api/student/practice', (_request, response, next) => {
     response.set('Cache-Control', 'no-store');
@@ -139,6 +150,7 @@ export function createApp({
     WebhookEventModel,
     RefundModel,
     paymentConfig,
+    paidPurchasesEnabled: launchConfig.paidPurchasesEnabled === true,
     gateway: paymentGateway ?? createRazorpayGateway({ keyId: paymentConfig.keyId, keySecret: paymentConfig.keySecret }),
   }));
   const catalogueModels = { ProductModel, ExamModel, SubjectModel, ChapterModel, TopicModel, CourseModel, QuestionBankModel, MockTestModel, TestAttemptModel };

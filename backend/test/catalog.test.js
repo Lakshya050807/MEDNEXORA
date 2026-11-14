@@ -221,6 +221,19 @@ test('public exam listing includes published configured exams without a geograph
   assert.equal(Object.hasOwn(examListFilter, 'region'), false);
 });
 
+test('unmatched API paths do not consume the public catalogue request limit', async () => {
+  const unrelated = [];
+  for (let offset = 0; offset < 301; offset += 20) {
+    const batchSize = Math.min(20, 301 - offset);
+    const batch = await Promise.all(Array.from({ length: batchSize }, () => fetch(`${baseUrl}/api/not-a-catalogue-route`)));
+    unrelated.push(...batch);
+  }
+  assert.equal(unrelated.every((response) => response.status === 404), true);
+
+  const exams = await request('/api/exams');
+  assert.equal(exams.response.status, 200);
+});
+
 test('admin mutations require a server-authenticated administrator role', async () => {
   const anonymous = await request('/api/admin/products', { method: 'POST', body: { title: 'Test' } });
   assert.equal(anonymous.response.status, 401);

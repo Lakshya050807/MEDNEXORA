@@ -3,16 +3,20 @@ import React from 'react';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import CourseCatalogPage from '../../src/pages/CourseCatalogPage.jsx';
 import { courseApi } from '../../src/services/courseApi.js';
+import { useAuth } from '../../src/context/AuthContext.jsx';
 
 vi.mock('../../src/services/courseApi.js', () => ({
-  courseApi: { list: vi.fn() },
+  courseApi: { list: vi.fn(), myCourses: vi.fn() },
 }));
+vi.mock('../../src/context/AuthContext.jsx', () => ({ useAuth: vi.fn() }));
 vi.mock('../../src/components/Icon.jsx', () => ({ default: () => null }));
 vi.mock('../../src/components/SiteHeader.jsx', () => ({ default: () => null }));
 
 describe('course catalogue', () => {
   beforeEach(() => {
     courseApi.list.mockResolvedValue({ items: [] });
+    courseApi.myCourses.mockResolvedValue({ items: [] });
+    useAuth.mockReturnValue({ user: null });
   });
 
   afterEach(() => {
@@ -59,5 +63,19 @@ describe('course catalogue', () => {
     expect(screen.getByText('Course outline in progress')).toBeTruthy();
     expect(screen.getByRole('link', { name: /View course/i })).toBeTruthy();
     expect(screen.queryByText('Draft · not available for enrollment')).toBeNull();
+  });
+
+  it('shows the authenticated student enrollment status and continue action', async () => {
+    useAuth.mockReturnValue({ user: { id: 'student-1' } });
+    courseApi.list.mockResolvedValue({ items: [{
+      id: 'course-1', courseType: 'video-course', category: 'Government Competitive Exam Preparation', lessonCount: 1,
+      subjects: [{ id: 'physics', name: 'Physics' }],
+      product: { title: 'Enrolled course', description: 'Configured description.', currentPricePaise: 0, isFree: true },
+    }] });
+    courseApi.myCourses.mockResolvedValue({ items: [{ id: 'course-1', accessType: 'free' }] });
+
+    render(<CourseCatalogPage />);
+    expect(await screen.findByText('Enrolled')).toBeTruthy();
+    expect(screen.getAllByRole('link', { name: /Continue learning/i }).some((link) => link.getAttribute('href') === '/courses/course-1/learn')).toBe(true);
   });
 });

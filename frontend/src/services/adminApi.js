@@ -71,11 +71,12 @@ export const adminApi = {
   logout: () => request('/logout', { method: 'POST', body: {} }),
   changePassword: (credentials) => request('/password', { method: 'POST', body: credentials }),
   profile: (options = {}) => request('/me', options),
-  overview: (options = {}) => request('/overview', options),
+  overview: ({ includeContentReadiness = false, ...options } = {}) => request(includeContentReadiness ? '/overview?includeContentReadiness=true' : '/overview', options),
   list: (resource, filters = {}, options = {}) => request(`/${resource}${queryString(filters)}`, options),
   create: (resource, data, options = {}) => request(`/${resource}`, { ...options, method: 'POST', body: data }),
   update: (resource, id, data, options = {}) => request(`/${resource}/${encodeURIComponent(id)}`, { ...options, method: 'PATCH', body: data }),
   remove: (resource, id, options = {}) => request(`/${resource}/${encodeURIComponent(id)}`, { ...options, method: 'DELETE' }),
+  removeCourseLesson: (courseId, lessonId, options = {}) => request(`/courses/${encodeURIComponent(courseId)}/lessons/${encodeURIComponent(lessonId)}`, { ...options, method: 'DELETE' }),
   uploadPdf,
 };
 
