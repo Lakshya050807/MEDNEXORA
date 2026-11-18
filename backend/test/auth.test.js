@@ -213,6 +213,53 @@ test('registration and login create a safe profile, access dashboard, and logout
   assert.equal(dashboardAfterLogout.response.headers.get('cache-control'), 'no-store');
 });
 
+test('closed public launch gates block only new registration and leave login, profile, logout, and safe launch status available', async () => {
+  const existingPassword = 'existing-student-account-password-42';
+  const existingUser = await FakeUserModel.create({
+    name: 'Existing Student',
+    email: 'existing.student@example.com',
+    passwordHash: await bcrypt.hash(existingPassword, 10),
+    role: 'student',
+  });
+  const gatedServer = await listen(createAuthTestApp({
+    launchConfig: { registrationEnabled: false, paidPurchasesEnabled: false },
+  }));
+  const gatedUrl = `http://127.0.0.1:${gatedServer.address().port}`;
+  try {
+    const status = await requestAt(gatedUrl, '/api/launch/status');
+    assert.equal(status.response.status, 200);
+    assert.equal(status.response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(status.body, { registrationEnabled: false, paidPurchasesEnabled: false });
+    assert.deepEqual(Object.keys(status.body).sort(), ['paidPurchasesEnabled', 'registrationEnabled']);
+
+    const registration = await requestAt(gatedUrl, '/api/auth/register', {
+      method: 'POST',
+      body: { name: 'New Student', email: 'new.student@example.com', password: 'new-student-password-42' },
+    });
+    assert.equal(registration.response.status, 503);
+    assert.equal(registration.body.code, 'PUBLIC_LAUNCH_GATE_CLOSED');
+    assert.equal(usersByEmail.has('new.student@example.com'), false);
+
+    const login = await requestAt(gatedUrl, '/api/auth/login', {
+      method: 'POST',
+      body: { email: existingUser.email, password: existingPassword },
+    });
+    assert.equal(login.response.status, 200);
+    assert.ok(login.cookie);
+
+    const profile = await requestAt(gatedUrl, '/api/auth/me', { cookie: login.cookie });
+    assert.equal(profile.response.status, 200);
+    assert.equal(profile.body.user.email, existingUser.email);
+
+    const logout = await requestAt(gatedUrl, '/api/auth/logout', { method: 'POST', cookie: login.cookie });
+    assert.equal(logout.response.status, 204);
+    const afterLogout = await requestAt(gatedUrl, '/api/auth/me', { cookie: login.cookie });
+    assert.equal(afterLogout.response.status, 401);
+  } finally {
+    await new Promise((resolve, reject) => gatedServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test('Secure student cookies are emitted behind Railway’s trusted HTTPS proxy and persist across profile refresh', async () => {
   const details = { name: 'Asha Student', email: 'asha@example.com', password: 'careful-study-pass-42' };
   const registration = await request('/api/auth/register', { method: 'POST', body: details });

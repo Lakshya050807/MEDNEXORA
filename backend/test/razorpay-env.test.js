@@ -216,6 +216,7 @@ test('checkout, payment verification, reconciliation, and webhook are unavailabl
   const controller = createPaymentController({
     paymentConfig: { mode: 'test', keyId: '', keySecret: '', webhookSecret: 'configured-test-webhook-secret' },
     gateway: {},
+    paidPurchasesEnabled: true,
   });
   const capture = () => ({
     statusCode: 200,

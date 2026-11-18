@@ -11,6 +11,29 @@ const trustProxyValue = process.env.TRUST_PROXY ?? '0';
 const nodeEnv = process.env.NODE_ENV ?? 'development';
 const configuredAppEnv = process.env.APP_ENV;
 const appEnv = configuredAppEnv ?? (nodeEnv === 'production' ? '' : nodeEnv);
+const productionRuntime = nodeEnv === 'production';
+const launchApprovalNames = [
+  'PUBLIC_ABOUT_PAGE_APPROVED',
+  'PUBLIC_CONTACT_PAGE_APPROVED',
+  'PUBLIC_FAQ_PAGE_APPROVED',
+  'PUBLIC_PRIVACY_POLICY_APPROVED',
+  'PUBLIC_TERMS_PAGE_APPROVED',
+  'PUBLIC_REFUND_POLICY_APPROVED',
+];
+function readBooleanSetting(name, defaultValue) {
+  const value = process.env[name];
+  if (value === undefined) return defaultValue;
+  if (value.trim().toLowerCase() === 'true') return true;
+  if (value.trim().toLowerCase() === 'false') return false;
+  throw new Error(`${name} must be either true or false.`);
+}
+const launchApprovals = Object.fromEntries(launchApprovalNames.map((name) => [
+  name,
+  readBooleanSetting(name, !productionRuntime),
+]));
+const launchApprovalsComplete = Object.values(launchApprovals).every(Boolean);
+const registrationRequested = readBooleanSetting('PUBLIC_BETA_REGISTRATION_ENABLED', !productionRuntime);
+const paidPurchasesRequested = readBooleanSetting('PUBLIC_BETA_PAID_PURCHASES_ENABLED', !productionRuntime);
 const configuredRazorpayMode = process.env.RAZORPAY_MODE;
 const razorpayMode = configuredRazorpayMode ?? 'test';
 const razorpayKeyId = process.env.RAZORPAY_KEY_ID ?? '';
@@ -47,6 +70,9 @@ if (nodeEnv === 'production' && !['staging', 'production'].includes(appEnv)) {
 if (['staging', 'production'].includes(appEnv) && nodeEnv !== 'production') {
   throw new Error('NODE_ENV=production is required when APP_ENV=staging or production.');
 }
+if (appEnv === 'staging' && (registrationRequested || paidPurchasesRequested)) {
+  throw new Error('Public registration and paid purchases must remain disabled in staging.');
+}
 if (nodeEnv === 'production' && !privateStorageDirValue) {
   throw new Error('Set PRIVATE_STORAGE_DIR to an explicit mounted storage path in production.');
 }
@@ -58,6 +84,12 @@ if (nodeEnv === 'production' && !configuredMongoUri) {
 }
 if (configuredMongoUri && !/^mongodb(?:\+srv)?:\/\//u.test(configuredMongoUri)) {
   throw new Error('MONGODB_URI must use the mongodb:// or mongodb+srv:// scheme.');
+}
+if (productionRuntime && (registrationRequested || paidPurchasesRequested) && !launchApprovalsComplete) {
+  throw new Error('Public registration and paid purchases require all six owner-approved public information and policy pages.');
+}
+if (productionRuntime && paidPurchasesRequested && appEnv !== 'production') {
+  throw new Error('Paid purchases may only be enabled when APP_ENV=production; staging remains test-only.');
 }
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -160,6 +192,8 @@ export const env = Object.freeze({
   port,
   nodeEnv,
   appEnv,
+  publicRegistrationEnabled: registrationRequested && (!productionRuntime || launchApprovalsComplete),
+  paidPurchasesEnabled: paidPurchasesRequested && (!productionRuntime || launchApprovalsComplete),
   mongoUri: configuredMongoUri || 'mongodb://127.0.0.1:27017/nursing_education',
   sessionSecret,
   sessionMaxAgeMs: sessionMaxAgeDays * 24 * 60 * 60 * 1000,

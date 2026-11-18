@@ -207,6 +207,7 @@ beforeEach(async () => {
       fetchedAssetUrl = String(url);
       return fetchedAssetResponse;
     },
+    launchConfig: { registrationEnabled: true, paidPurchasesEnabled: false },
   });
   await new Promise((resolve) => { server = server.listen(0, '127.0.0.1', resolve); });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -299,6 +300,8 @@ test('verified owner download proxies only a configured private-origin PDF', asy
 });
 
 test('free PDF access is claimed on the server, idempotent, listed in My Library, and isolated per student', async () => {
+  const launchStatus = await request('/api/launch/status');
+  assert.deepEqual(launchStatus.body, { registrationEnabled: true, paidPurchasesEnabled: false });
   const anonymous = await request(`/api/student/resources/${ids.productFreePdf}/access`, { method: 'POST', body: {} });
   assert.equal(anonymous.response.status, 401);
   const cookie = await registerAndLogin('asha@example.com', 'Asha Student');

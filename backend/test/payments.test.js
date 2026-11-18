@@ -287,6 +287,7 @@ beforeEach(async () => {
     RefundModel: FakeRefundModel,
     paymentGateway,
     paymentConfig,
+    launchConfig: { registrationEnabled: true, paidPurchasesEnabled: true },
   });
   await new Promise((resolve) => { server = server.listen(0, '127.0.0.1', resolve); });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -298,10 +299,14 @@ afterEach(async () => {
 });
 
 async function request(path, { method = 'GET', body, rawBody, cookie, headers = {} } = {}) {
+  return requestAt(baseUrl, path, { method, body, rawBody, cookie, headers });
+}
+
+async function requestAt(url, path, { method = 'GET', body, rawBody, cookie, headers = {} } = {}) {
   const requestHeaders = { ...headers };
   if (body !== undefined || rawBody !== undefined) requestHeaders['Content-Type'] = 'application/json';
   if (cookie) requestHeaders.Cookie = cookie;
-  const response = await fetch(`${baseUrl}${path}`, { method, headers: requestHeaders, body: rawBody ?? (body === undefined ? undefined : JSON.stringify(body)) });
+  const response = await fetch(`${url}${path}`, { method, headers: requestHeaders, body: rawBody ?? (body === undefined ? undefined : JSON.stringify(body)) });
   let payload;
   try { payload = await response.json(); } catch { payload = null; }
   const setCookie = response.headers.get('set-cookie');
@@ -326,6 +331,75 @@ async function checkout(cookie, product = productId, idempotencyKey = 'checkout_
 function checkoutSignature(orderId, paymentId) {
   return createHmac('sha256', keySecret).update(`${orderId}|${paymentId}`).digest('hex');
 }
+
+test('paid-purchase gate blocks new checkout without blocking launch status or payment verification, reconciliation, and webhooks', async () => {
+  const gatedApp = createApp({
+    sessionStore: new session.MemoryStore(),
+    UserModel: FakeUserModel,
+    ProductModel: FakeProductModel,
+    OrderModel: FakeOrderModel,
+    PurchasedAccessModel: FakePurchasedAccessModel,
+    WebhookEventModel: FakeWebhookEventModel,
+    RefundModel: FakeRefundModel,
+    paymentGateway,
+    paymentConfig,
+    launchConfig: { registrationEnabled: true, paidPurchasesEnabled: false },
+  });
+  const gatedServer = await new Promise((resolve, reject) => {
+    const instance = gatedApp.listen(0, '127.0.0.1', () => resolve(instance));
+    instance.once('error', reject);
+  });
+  const gatedUrl = `http://127.0.0.1:${gatedServer.address().port}`;
+  try {
+    const status = await requestAt(gatedUrl, '/api/launch/status');
+    assert.deepEqual(status.body, { registrationEnabled: true, paidPurchasesEnabled: false });
+    assert.equal(status.response.headers.get('cache-control'), 'no-store');
+
+    const registration = await requestAt(gatedUrl, '/api/auth/register', {
+      method: 'POST',
+      body: { name: 'Gate Test Student', email: 'gate-test@example.com', password: 'gate-test-student-password-42' },
+    });
+    assert.equal(registration.response.status, 201);
+    const login = await requestAt(gatedUrl, '/api/auth/login', {
+      method: 'POST',
+      body: { email: 'gate-test@example.com', password: 'gate-test-student-password-42' },
+    });
+    assert.equal(login.response.status, 200);
+
+    const checkoutResponse = await requestAt(gatedUrl, '/api/payments/orders', {
+      method: 'POST',
+      cookie: login.cookie,
+      body: { idempotencyKey: 'closed_gate_checkout', items: [{ productId, quantity: 1 }] },
+    });
+    assert.equal(checkoutResponse.response.status, 503);
+    assert.deepEqual(checkoutResponse.body, {
+      code: 'PUBLIC_LAUNCH_GATE_CLOSED',
+      message: 'Paid purchases are temporarily unavailable.',
+    });
+    assert.equal(orders.size, 0);
+    assert.equal(gatewayCreateCount, 0);
+
+    const verify = await requestAt(gatedUrl, '/api/payments/orders/507f1f77bcf86cd799439299/verify', {
+      method: 'POST', cookie: login.cookie, body: {},
+    });
+    assert.notEqual(verify.response.status, 503, 'payment verification is not blocked by the new-purchase gate');
+    assert.notEqual(verify.body?.code, 'PUBLIC_LAUNCH_GATE_CLOSED');
+
+    const reconcile = await requestAt(gatedUrl, '/api/payments/orders/507f1f77bcf86cd799439299/reconcile', {
+      method: 'POST', cookie: login.cookie, body: {},
+    });
+    assert.notEqual(reconcile.response.status, 503, 'payment reconciliation is not blocked by the new-purchase gate');
+    assert.notEqual(reconcile.body?.code, 'PUBLIC_LAUNCH_GATE_CLOSED');
+
+    const invalidWebhook = await requestAt(gatedUrl, '/api/payments/webhook', {
+      method: 'POST', rawBody: '{}', headers: { 'X-Razorpay-Signature': '0'.repeat(64) },
+    });
+    assert.notEqual(invalidWebhook.response.status, 503, 'webhook verification remains available independently of checkout');
+    assert.notEqual(invalidWebhook.body?.code, 'PUBLIC_LAUNCH_GATE_CLOSED');
+  } finally {
+    await new Promise((resolve, reject) => gatedServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
 
 function webhookSignature(rawBody) {
   return createHmac('sha256', webhookSecret).update(rawBody).digest('hex');

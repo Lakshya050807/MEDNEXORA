@@ -173,6 +173,7 @@ beforeEach(async () => {
     CourseModel: FakeCourseModel,
     CourseProgressModel: FakeCourseProgressModel,
     PurchasedAccessModel: FakePurchasedAccessModel,
+    launchConfig: { registrationEnabled: true, paidPurchasesEnabled: false },
   });
   server = await new Promise((resolve) => { const instance = app.listen(0, '127.0.0.1', () => resolve(instance)); });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -352,6 +353,8 @@ test('purchased and free course progress persists, is idempotent, and belongs to
 });
 
 test('free course video plays only with a valid configured provider ID and public completion saves progress', async () => {
+  const launchStatus = await request('/api/launch/status');
+  assert.deepEqual(launchStatus.payload, { registrationEnabled: true, paidPurchasesEnabled: false });
   const cookie = await register('free-course@example.com');
   const playback = await request(`/api/student/courses/${freeCourseId}/lessons/${freeLessonId}/playback`, { cookie });
   assert.equal(playback.response.status, 200);
