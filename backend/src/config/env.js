@@ -9,7 +9,8 @@ const sessionMaxAgeDays = Number(process.env.SESSION_MAX_AGE_DAYS ?? '7');
 const appOriginValue = process.env.APP_ORIGIN ?? 'http://localhost:5173';
 const trustProxyValue = process.env.TRUST_PROXY ?? '0';
 const nodeEnv = process.env.NODE_ENV ?? 'development';
-const appEnv = process.env.APP_ENV ?? (nodeEnv === 'production' ? 'production' : nodeEnv);
+const configuredAppEnv = process.env.APP_ENV;
+const appEnv = configuredAppEnv ?? (nodeEnv === 'production' ? '' : nodeEnv);
 const configuredRazorpayMode = process.env.RAZORPAY_MODE;
 const razorpayMode = configuredRazorpayMode ?? 'test';
 const razorpayKeyId = process.env.RAZORPAY_KEY_ID ?? '';
@@ -33,6 +34,9 @@ if (frontendStaticDirectories.some((directory) => isWithinDirectory(directory, p
 
 if (!['development', 'test', 'production'].includes(nodeEnv)) {
   throw new Error('NODE_ENV must be development, test, or production.');
+}
+if (nodeEnv === 'production' && configuredAppEnv === undefined) {
+  throw new Error('APP_ENV must be explicitly set to staging or production when NODE_ENV=production.');
 }
 if (!['development', 'test', 'staging', 'production'].includes(appEnv)) {
   throw new Error('APP_ENV must be development, test, staging, or production.');

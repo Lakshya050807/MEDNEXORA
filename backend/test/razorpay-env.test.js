@@ -45,14 +45,21 @@ test('production starts only with explicitly selected live Razorpay credentials'
   });
 });
 
-test('production without APP_ENV keeps the legacy strict production policy', () => {
-  const result = runEnvironment({ unset: ['APP_ENV'] });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).appEnv, 'production');
+test('production requires an explicit APP_ENV regardless of Razorpay mode', () => {
+  for (const mode of ['live', 'test', undefined]) {
+    const overrides = mode === undefined ? {} : { RAZORPAY_MODE: mode };
+    const result = runEnvironment({ overrides, unset: ['APP_ENV', ...(mode === undefined ? ['RAZORPAY_MODE'] : [])] });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /APP_ENV must be explicitly set to staging or production/u);
+  }
+});
 
-  const testMode = runEnvironment({ unset: ['APP_ENV'], overrides: { RAZORPAY_MODE: 'test', RAZORPAY_KEY_ID: 'rzp_test_example-key-id' } });
-  assert.notEqual(testMode.status, 0);
-  assert.match(testMode.stderr, /Set RAZORPAY_MODE=live explicitly in production/u);
+test('invalid or blank APP_ENV values fail closed in production', () => {
+  for (const appEnv of ['', 'prod', 'staging ']) {
+    const result = runEnvironment({ overrides: { APP_ENV: appEnv } });
+    assert.notEqual(result.status, 0, `APP_ENV=${JSON.stringify(appEnv)} must be rejected`);
+    assert.match(result.stderr, /APP_ENV must be development, test, staging, or production/u);
+  }
 });
 
 test('production rejects Razorpay test mode and an unset mode', () => {
@@ -142,6 +149,59 @@ test('staging requires explicit test mode and rejects live mode or live credenti
   });
   assert.notEqual(liveKeyWithTestMode.status, 0);
   assert.match(liveKeyWithTestMode.stderr, /RAZORPAY_KEY_ID must be a Razorpay Test Mode key/u);
+});
+
+test('deployment environment and Razorpay mode matrix fails closed on cross-lane combinations', () => {
+  const cases = [
+    {
+      name: 'staging runtime with test mode',
+      overrides: { NODE_ENV: 'production', APP_ENV: 'staging', RAZORPAY_MODE: 'test' },
+      unset: ['RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET'],
+      succeeds: true,
+    },
+    {
+      name: 'staging runtime with live mode',
+      overrides: { NODE_ENV: 'production', APP_ENV: 'staging', RAZORPAY_MODE: 'live' },
+      unset: ['RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET'],
+      error: /Set RAZORPAY_MODE=test explicitly in staging/u,
+    },
+    {
+      name: 'production runtime with live mode',
+      overrides: { NODE_ENV: 'production', APP_ENV: 'production', RAZORPAY_MODE: 'live' },
+      succeeds: true,
+    },
+    {
+      name: 'production runtime with test mode',
+      overrides: { NODE_ENV: 'production', APP_ENV: 'production', RAZORPAY_MODE: 'test', RAZORPAY_KEY_ID: 'rzp_test_example-key-id' },
+      error: /Set RAZORPAY_MODE=live explicitly in production/u,
+    },
+    {
+      name: 'production runtime with missing mode',
+      overrides: { NODE_ENV: 'production', APP_ENV: 'production' },
+      unset: ['RAZORPAY_MODE'],
+      error: /Set RAZORPAY_MODE=live explicitly in production/u,
+    },
+    {
+      name: 'development runtime with test mode',
+      overrides: { NODE_ENV: 'development', APP_ENV: 'development', RAZORPAY_MODE: 'test', RAZORPAY_KEY_ID: 'rzp_test_example-key-id' },
+      succeeds: true,
+    },
+    {
+      name: 'development runtime with live mode',
+      overrides: { NODE_ENV: 'development', APP_ENV: 'development', RAZORPAY_MODE: 'live' },
+      error: /Razorpay live mode is only allowed when APP_ENV is production/u,
+    },
+  ];
+
+  for (const scenario of cases) {
+    const result = runEnvironment({ overrides: scenario.overrides, unset: scenario.unset ?? [] });
+    if (scenario.succeeds) {
+      assert.equal(result.status, 0, `${scenario.name}: ${result.stderr}`);
+    } else {
+      assert.notEqual(result.status, 0, `${scenario.name} must fail`);
+      assert.match(result.stderr, scenario.error, scenario.name);
+    }
+  }
 });
 
 test('production cannot be downgraded to staging runtime settings by an inconsistent APP_ENV', () => {
