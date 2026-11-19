@@ -14,6 +14,7 @@ const [{ createApp }, session, bcrypt] = await Promise.all([
   import('express-session'),
   import('bcryptjs'),
 ]);
+const { registrationTestAppOptions, withVerifiedRegistration, resetRegistrationTestModels } = await import('./helpers/registration.js');
 
 const ids = {
   subject: '507f1f77bcf86cd799439201',
@@ -134,6 +135,7 @@ const SubjectModel = modelFor('subjects');
 const TopicModel = modelFor('topics');
 
 beforeEach(async () => {
+  resetRegistrationTestModels();
   privateStorageDir = await mkdtemp(join(tmpdir(), 'nursing-private-download-'));
   const now = new Date('2026-10-21T10:00:00Z');
   const studentId = '507f1f77bcf86cd799430001';
@@ -189,6 +191,7 @@ beforeEach(async () => {
   fetchedAssetUrl = null;
   fetchedAssetResponse = new Response('%PDF-1.7 student copy', { status: 200, headers: { 'content-type': 'application/pdf' } });
   server = createApp({
+    ...registrationTestAppOptions(),
     sessionStore: new session.MemoryStore(),
     UserModel: FakeUserModel,
     ProductModel,
@@ -229,7 +232,7 @@ async function request(path, { method = 'GET', body, cookie } = {}) {
 }
 
 async function registerAndLogin(email, name) {
-  await request('/api/auth/register', { method: 'POST', body: { email, name, password: 'safe-student-password-2026' } });
+  await request('/api/auth/register', { method: 'POST', body: withVerifiedRegistration({ email, name, password: 'safe-student-password-2026' }) });
   const login = await request('/api/auth/login', { method: 'POST', body: { email, password: 'safe-student-password-2026' } });
   assert.equal(login.response.status, 200);
   return login.cookie;

@@ -14,6 +14,8 @@ import Order from './models/Order.js';
 import PurchasedAccess from './models/PurchasedAccess.js';
 import PaymentWebhookEvent from './models/PaymentWebhookEvent.js';
 import PaymentRefund from './models/PaymentRefund.js';
+import PasswordResetRateLimit from './models/PasswordResetRateLimit.js';
+import RegistrationVerificationChallenge from './models/RegistrationVerificationChallenge.js';
 import CourseProgress from './models/CourseProgress.js';
 import { env } from './config/env.js';
 import { createAdminRoutes } from './routes/admin.routes.js';
@@ -26,6 +28,7 @@ import { createCourseRoutes } from './routes/course.routes.js';
 import { createStudentCourseRoutes } from './routes/student-courses.routes.js';
 import { createPaymentRoutes } from './routes/payment.routes.js';
 import { createRazorpayGateway } from './services/razorpayGateway.js';
+import { createResendEmailProvider } from './services/emailProvider.js';
 
 export function createApp({
   sessionStore,
@@ -43,6 +46,8 @@ export function createApp({
   PurchasedAccessModel = PurchasedAccess,
   WebhookEventModel = PaymentWebhookEvent,
   RefundModel = PaymentRefund,
+  PasswordResetRateLimitModel = PasswordResetRateLimit,
+  RegistrationVerificationChallengeModel = RegistrationVerificationChallenge,
   CourseProgressModel = CourseProgress,
   privateStorageOrigin = env.privateStorageOrigin,
   privateStorageDir = env.privateStorageDir,
@@ -53,6 +58,17 @@ export function createApp({
     registrationEnabled: env.publicRegistrationEnabled,
     paidPurchasesEnabled: env.paidPurchasesEnabled,
   },
+  passwordResetEmailEnabled = env.passwordResetEmailEnabled,
+  passwordResetOtpPepper = env.passwordResetOtpPepper,
+  passwordResetEmailProvider,
+  passwordResetRateLimitSecret = env.sessionSecret,
+  passwordResetNow,
+  registrationEmailVerificationEnabled = env.registrationEmailVerificationEnabled,
+  stagingRestrictedRegistrationEnabled = env.stagingRestrictedRegistrationEnabled,
+  stagingRegistrationInvitationTtlMinutes = env.stagingRegistrationInvitationTtlMinutes,
+  registrationOtpPepper = env.registrationOtpPepper,
+  registrationNow,
+  registrationEmailProvider,
   paymentConfig = {
     keyId: env.razorpayKeyId,
     keySecret: env.razorpayKeySecret,
@@ -63,6 +79,10 @@ export function createApp({
 } = {}) {
   if (!sessionStore && env.nodeEnv === 'test') sessionStore = new session.MemoryStore();
   if (!sessionStore) throw new Error('A persistent session store is required outside tests.');
+  const effectiveEmailProvider = registrationEmailProvider ?? passwordResetEmailProvider ?? createResendEmailProvider({
+    apiKey: env.resendApiKey,
+    from: env.passwordResetFromEmail,
+  });
 
   const app = express();
   app.disable('x-powered-by');
@@ -109,7 +129,23 @@ export function createApp({
   app.use('/api/auth', (_request, response, next) => {
     response.set('Cache-Control', 'no-store');
     next();
-  }, studentSession, createAuthRoutes({ UserModel, registrationEnabled: launchConfig.registrationEnabled === true }));
+  }, studentSession, createAuthRoutes({
+    UserModel,
+    PasswordResetRateLimitModel,
+    registrationEnabled: launchConfig.registrationEnabled === true,
+    stagingRestrictedRegistrationEnabled,
+    stagingRegistrationInvitationTtlMinutes,
+    registrationEmailVerificationEnabled,
+    registrationOtpPepper,
+    RegistrationVerificationChallengeModel,
+    registrationNow,
+    passwordResetEmailEnabled,
+    passwordResetOtpPepper,
+    passwordResetEmailProvider: effectiveEmailProvider,
+    registrationEmailProvider: effectiveEmailProvider,
+    passwordResetRateLimitSecret,
+    passwordResetNow,
+  }));
   const practiceModels = { UserModel, QuestionBankModel, MockTestModel, ProductModel, PurchasedAccessModel, TestAttemptModel, ExamModel, SubjectModel, TopicModel, ChapterModel };
   app.use('/api/student/practice', (_request, response, next) => {
     response.set('Cache-Control', 'no-store');
@@ -159,7 +195,21 @@ export function createApp({
   app.use('/api/admin', (_request, response, next) => {
     response.set('Cache-Control', 'no-store');
     next();
-  }, adminSession, createAdminRoutes({ UserModel, OrderModel, PurchasedAccessModel, RefundModel, CourseProgressModel, privateStorageDir, ...catalogueModels }));
+  }, adminSession, createAdminRoutes({
+    UserModel,
+    OrderModel,
+    PurchasedAccessModel,
+    RefundModel,
+    CourseProgressModel,
+    RegistrationVerificationChallengeModel,
+    PasswordResetRateLimitModel,
+    stagingRestrictedRegistrationEnabled,
+    stagingRegistrationInvitationTtlMinutes,
+    stagingRegistrationNow: registrationNow,
+    passwordResetRateLimitSecret,
+    privateStorageDir,
+    ...catalogueModels,
+  }));
 
   app.use((error, _request, response, next) => {
     if (response.headersSent) return next(error);

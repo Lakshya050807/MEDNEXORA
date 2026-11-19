@@ -1,10 +1,11 @@
 import { env } from '../config/env.js';
 
-export function regenerateStudentSession(request, userId) {
+export function regenerateStudentSession(request, userId, sessionVersion = 0) {
   return new Promise((resolve, reject) => {
     request.session.regenerate((regenerateError) => {
       if (regenerateError) return reject(regenerateError);
       request.session.userId = userId.toString();
+      request.session.studentSessionVersion = Number(sessionVersion) || 0;
       request.session.save((saveError) => {
         if (saveError) return reject(saveError);
         return resolve();

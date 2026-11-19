@@ -15,6 +15,7 @@
     "course:setup-flagship": "node scripts/create-flagship-course.js",
     "payments:reservations:backfill": "node scripts/backfill-purchase-reservations.js",
     "db:study-material-text-index": "node scripts/migrate-study-material-text-index.js",
+    "test:registration-mongodb": "node --test test/registration-mongodb.integration.test.js",
     "test": "node --test"
   },
   "dependencies": {
@@ -24,5 +25,8 @@
     "express": "^5.3.0",
     "express-session": "^1.19.0",
     "mongoose": "^9.11.2"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^11.3.0"
   }
 }

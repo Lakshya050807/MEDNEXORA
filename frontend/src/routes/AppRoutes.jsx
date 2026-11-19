@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import HomePage from '../pages/HomePage.jsx';
 import LoginPage from '../pages/LoginPage.jsx';
+import ForgotPasswordPage from '../pages/ForgotPasswordPage.jsx';
 import ProductDetailPage from '../pages/ProductDetailPage.jsx';
 import ProtectedStudentRoute from '../pages/ProtectedStudentRoute.jsx';
 import RegisterPage from '../pages/RegisterPage.jsx';
@@ -28,6 +29,7 @@ export default function AppRoutes() {
   }, [path]);
 
   if (path === '/login') return <LoginPage />;
+  if (path === '/forgot-password') return <ForgotPasswordPage />;
   if (path === '/register') return <RegisterPage />;
   if (path === '/about') return <InformationPage page="about" />;
   if (path === '/contact') return <InformationPage page="contact" />;

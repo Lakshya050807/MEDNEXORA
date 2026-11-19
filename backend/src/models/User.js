@@ -27,6 +27,21 @@ const userSchema = new mongoose.Schema({
     sparse: true,
   },
   adminSessionVersion: { type: Number, min: 0, default: 0, select: false },
+  studentSessionVersion: { type: Number, min: 0, default: 0, select: false },
+  // Historical records without this field remain treated as verified; public
+  // registration explicitly sets true only after consuming a server proof.
+  emailVerified: { type: Boolean, default: true },
+  passwordResetOtpHash: { type: String, select: false },
+  passwordResetOtpExpiresAt: { type: Date, select: false },
+  passwordResetOtpStatus: { type: String, enum: ['pending', 'active'], select: false },
+  // Completion requires this separate fence, set only after the active-state
+  // write has returned an acknowledged result. Legacy active challenges without
+  // the field remain unusable until a fresh code is requested.
+  passwordResetOtpActivationConfirmed: { type: Boolean, default: false, select: false },
+  passwordResetOtpAttempts: { type: Number, min: 0, default: 0, select: false },
+  passwordResetOtpLastSentAt: { type: Date, select: false },
+  passwordResetOtpResendWindowStartedAt: { type: Date, select: false },
+  passwordResetOtpResendCount: { type: Number, min: 0, default: 0, select: false },
   passwordHash: {
     type: String,
     required: true,
@@ -44,6 +59,15 @@ const userSchema = new mongoose.Schema({
     transform(_document, returned) {
       delete returned.passwordHash;
       delete returned.adminSessionVersion;
+      delete returned.studentSessionVersion;
+      delete returned.passwordResetOtpHash;
+      delete returned.passwordResetOtpExpiresAt;
+      delete returned.passwordResetOtpStatus;
+      delete returned.passwordResetOtpActivationConfirmed;
+      delete returned.passwordResetOtpAttempts;
+      delete returned.passwordResetOtpLastSentAt;
+      delete returned.passwordResetOtpResendWindowStartedAt;
+      delete returned.passwordResetOtpResendCount;
       delete returned.__v;
       return returned;
     },

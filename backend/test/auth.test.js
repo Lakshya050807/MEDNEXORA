@@ -12,6 +12,11 @@ const [{ createApp }, session, bcrypt, UserModule] = await Promise.all([
   import('../src/models/User.js'),
 ]);
 const User = UserModule.default;
+const {
+  resetRegistrationTestModels,
+  registrationTestAppOptions,
+  withVerifiedRegistration,
+} = await import('./helpers/registration.js');
 
 class EmptyQuery {
   constructor(value) { this.value = value; }
@@ -36,6 +41,7 @@ let createFailure;
 let duplicateOnCreate;
 let server;
 let baseUrl;
+let sessionStore;
 
 class FakeUserModel {
   static async exists({ email }) {
@@ -73,13 +79,16 @@ class FakeUserModel {
 }
 
 beforeEach(async () => {
+  resetRegistrationTestModels();
   usersByEmail = new Map();
   usersById = new Map();
   nextId = 1;
   createFailure = null;
   duplicateOnCreate = false;
+  sessionStore = new session.MemoryStore();
   server = createApp({
-    sessionStore: new session.MemoryStore(),
+    ...registrationTestAppOptions(),
+    sessionStore,
     UserModel: FakeUserModel,
     ProductModel: EmptyDashboardModel,
     CourseModel: EmptyDashboardModel,
@@ -114,10 +123,13 @@ async function requestAt(url, path, { method = 'GET', body, cookie, origin, fetc
   if (origin) headers.Origin = origin;
   if (fetchSite) headers['Sec-Fetch-Site'] = fetchSite;
   if (forwardedProto) headers['X-Forwarded-Proto'] = forwardedProto;
+  const requestBody = path === '/api/auth/register' && body && typeof body === 'object'
+    ? withVerifiedRegistration(body)
+    : body;
   const response = await fetch(`${url}${path}`, {
     method,
     headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: requestBody === undefined ? undefined : JSON.stringify(requestBody),
   });
   const responseBody = response.status === 204 ? null : await response.json();
   const setCookie = response.headers.get('set-cookie');
@@ -131,6 +143,7 @@ async function requestAt(url, path, { method = 'GET', body, cookie, origin, fetc
 
 function createAuthTestApp(overrides = {}) {
   return createApp({
+    ...registrationTestAppOptions(),
     sessionStore: new session.MemoryStore(),
     UserModel: FakeUserModel,
     ProductModel: EmptyDashboardModel,
@@ -156,6 +169,25 @@ async function listen(app) {
   return instance;
 }
 
+function sessionIdFromCookie(cookie) {
+  const pair = cookie.split(';', 1)[0];
+  const signedValue = decodeURIComponent(pair.slice(pair.indexOf('=') + 1));
+  assert.match(signedValue, /^s:/u);
+  return signedValue.slice(2).split('.')[0];
+}
+
+function readStoredSession(store, cookie) {
+  return new Promise((resolve, reject) => {
+    store.get(sessionIdFromCookie(cookie), (error, stored) => error ? reject(error) : resolve(stored));
+  });
+}
+
+function writeStoredSession(store, cookie, value) {
+  return new Promise((resolve, reject) => {
+    store.set(sessionIdFromCookie(cookie), value, (error) => error ? reject(error) : resolve());
+  });
+}
+
 test('registration and login create a safe profile, access dashboard, and logout', async () => {
   const registration = await request('/api/auth/register', {
     method: 'POST',
@@ -175,6 +207,7 @@ test('registration and login create a safe profile, access dashboard, and logout
   assert.equal(usersByEmail.get('asha@example.com').role, 'student');
   assert.notEqual(usersByEmail.get('asha@example.com').passwordHash, 'careful-study-pass-42');
   assert.equal(await bcrypt.compare('careful-study-pass-42', usersByEmail.get('asha@example.com').passwordHash), true);
+  assert.equal((await readStoredSession(sessionStore, registration.cookie)).studentSessionVersion, 0);
 
   const login = await request('/api/auth/login', {
     method: 'POST',
@@ -184,6 +217,7 @@ test('registration and login create a safe profile, access dashboard, and logout
   assert.ok(login.cookie);
   assert.equal(login.response.headers.get('cache-control'), 'no-store');
   assert.notEqual(login.cookie, registration.cookie, 'login should rotate the session identifier');
+  assert.equal((await readStoredSession(sessionStore, login.cookie)).studentSessionVersion, 0);
 
   const profile = await request('/api/auth/me', { cookie: login.cookie });
   assert.equal(profile.response.status, 200);
@@ -215,13 +249,22 @@ test('registration and login create a safe profile, access dashboard, and logout
 
 test('closed public launch gates block only new registration and leave login, profile, logout, and safe launch status available', async () => {
   const existingPassword = 'existing-student-account-password-42';
+  const gatedSessionStore = new session.MemoryStore();
   const existingUser = await FakeUserModel.create({
     name: 'Existing Student',
     email: 'existing.student@example.com',
     passwordHash: await bcrypt.hash(existingPassword, 10),
     role: 'student',
+    studentSessionVersion: 5,
+    passwordResetOtpHash: 'private-otp-hmac-digest',
+    passwordResetOtpExpiresAt: new Date(),
+    passwordResetOtpAttempts: 2,
+    passwordResetOtpLastSentAt: new Date(),
+    passwordResetOtpResendWindowStartedAt: new Date(),
+    passwordResetOtpResendCount: 3,
   });
   const gatedServer = await listen(createAuthTestApp({
+    sessionStore: gatedSessionStore,
     launchConfig: { registrationEnabled: false, paidPurchasesEnabled: false },
   }));
   const gatedUrl = `http://127.0.0.1:${gatedServer.address().port}`;
@@ -246,10 +289,15 @@ test('closed public launch gates block only new registration and leave login, pr
     });
     assert.equal(login.response.status, 200);
     assert.ok(login.cookie);
+    assert.equal((await readStoredSession(gatedSessionStore, login.cookie)).studentSessionVersion, 5);
 
     const profile = await requestAt(gatedUrl, '/api/auth/me', { cookie: login.cookie });
     assert.equal(profile.response.status, 200);
     assert.equal(profile.body.user.email, existingUser.email);
+    const serializedProfile = JSON.stringify(profile.body);
+    for (const sensitiveValue of ['private-otp-hmac-digest', 'passwordResetOtpExpiresAt', 'passwordResetOtpAttempts', 'passwordResetOtpLastSentAt', 'passwordResetOtpResendWindowStartedAt', 'passwordResetOtpResendCount', 'studentSessionVersion']) {
+      assert.equal(serializedProfile.includes(sensitiveValue), false, `${sensitiveValue} must not appear in the profile response`);
+    }
 
     const logout = await requestAt(gatedUrl, '/api/auth/logout', { method: 'POST', cookie: login.cookie });
     assert.equal(logout.response.status, 204);
@@ -257,6 +305,82 @@ test('closed public launch gates block only new registration and leave login, pr
     assert.equal(afterLogout.response.status, 401);
   } finally {
     await new Promise((resolve, reject) => gatedServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('legacy student sessions without a version remain valid; incrementing the user version rejects old sessions', async () => {
+  const legacyStore = new session.MemoryStore();
+  const legacyUser = await FakeUserModel.create({
+    name: 'Legacy Student',
+    email: 'legacy.student@example.com',
+    passwordHash: await bcrypt.hash('legacy-student-password-42', 10),
+    role: 'student',
+  });
+  const legacyServer = await listen(createAuthTestApp({ sessionStore: legacyStore }));
+  const legacyUrl = `http://127.0.0.1:${legacyServer.address().port}`;
+  try {
+    const login = await requestAt(legacyUrl, '/api/auth/login', {
+      method: 'POST',
+      body: { email: legacyUser.email, password: 'legacy-student-password-42' },
+    });
+    assert.equal(login.response.status, 200);
+    const originalSession = await readStoredSession(legacyStore, login.cookie);
+    assert.equal(originalSession.studentSessionVersion, 0, 'missing database versions are treated as version zero on login');
+
+    delete originalSession.studentSessionVersion;
+    await writeStoredSession(legacyStore, login.cookie, originalSession);
+    const legacyProfile = await requestAt(legacyUrl, '/api/auth/me', { cookie: login.cookie });
+    assert.equal(legacyProfile.response.status, 200, 'sessions created before versioning remain valid at version zero');
+    assert.equal(legacyUser.studentSessionVersion, undefined, 'the legacy user record does not need a migration');
+
+    legacyUser.studentSessionVersion = 1;
+    const staleProfile = await requestAt(legacyUrl, '/api/auth/me', { cookie: login.cookie });
+    assert.equal(staleProfile.response.status, 401, 'version increment invalidates the prior student session');
+    assert.match(staleProfile.setCookie, /(?:Max-Age=0|Expires=Thu, 01 Jan 1970)/i);
+
+    const refreshedLogin = await requestAt(legacyUrl, '/api/auth/login', {
+      method: 'POST',
+      body: { email: legacyUser.email, password: 'legacy-student-password-42' },
+    });
+    assert.equal(refreshedLogin.response.status, 200);
+    assert.equal((await readStoredSession(legacyStore, refreshedLogin.cookie)).studentSessionVersion, 1);
+    assert.equal((await requestAt(legacyUrl, '/api/auth/me', { cookie: refreshedLogin.cookie })).response.status, 200);
+  } finally {
+    await new Promise((resolve, reject) => legacyServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('student session and password-reset fields are hidden from Mongoose serialization', () => {
+  const resetFieldNames = [
+    'passwordResetOtpHash',
+    'passwordResetOtpExpiresAt',
+    'passwordResetOtpActivationConfirmed',
+    'passwordResetOtpAttempts',
+    'passwordResetOtpLastSentAt',
+    'passwordResetOtpResendWindowStartedAt',
+    'passwordResetOtpResendCount',
+  ];
+  assert.equal(User.schema.path('studentSessionVersion').options.default, 0);
+  assert.equal(User.schema.path('studentSessionVersion').options.select, false);
+  assert.equal(new User({}).studentSessionVersion, 0);
+  for (const field of resetFieldNames) assert.equal(User.schema.path(field).options.select, false);
+
+  const user = new User({
+    name: 'Serialized Student',
+    email: 'serialized@example.com',
+    passwordHash: 'private-password-hash',
+    studentSessionVersion: 9,
+    passwordResetOtpHash: 'private-otp-hmac-digest',
+    passwordResetOtpExpiresAt: new Date(),
+    passwordResetOtpActivationConfirmed: true,
+    passwordResetOtpAttempts: 2,
+    passwordResetOtpLastSentAt: new Date(),
+    passwordResetOtpResendWindowStartedAt: new Date(),
+    passwordResetOtpResendCount: 3,
+  });
+  const serialized = user.toJSON();
+  for (const field of ['studentSessionVersion', ...resetFieldNames, 'passwordHash']) {
+    assert.equal(Object.hasOwn(serialized, field), false, `${field} must not serialize`);
   }
 });
 
@@ -326,20 +450,20 @@ test('duplicate registration is rejected with the safe login instruction', async
   const first = await request('/api/auth/register', { method: 'POST', body: details });
   const duplicate = await request('/api/auth/register', { method: 'POST', body: details });
   assert.equal(first.response.status, 201);
-  assert.equal(duplicate.response.status, 409);
-  assert.equal(duplicate.body.message, 'This email is already registered. Please log in instead.');
+  assert.equal(duplicate.response.status, 400);
+  assert.equal(duplicate.body.message, 'The email verification could not be completed. Request a new code and try again.');
   assert.equal(usersByEmail.size, 1);
   assert.equal('passwordHash' in duplicate.body, false);
 });
 
-test('the MongoDB duplicate-key race path returns the same safe duplicate message', async () => {
+test('the MongoDB duplicate-key race path returns a safe registration error', async () => {
   duplicateOnCreate = true;
   const result = await request('/api/auth/register', {
     method: 'POST',
     body: { name: 'Devika Student', email: 'devika@example.com', password: 'student-nursing-pass-3' },
   });
-  assert.equal(result.response.status, 409);
-  assert.deepEqual(result.body, { message: 'This email is already registered. Please log in instead.' });
+  assert.equal(result.response.status, 400);
+  assert.deepEqual(result.body, { message: 'The email verification could not be completed. Request a new code and try again.' });
   assert.equal(usersByEmail.size, 0);
 });
 

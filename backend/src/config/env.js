@@ -34,6 +34,14 @@ const launchApprovals = Object.fromEntries(launchApprovalNames.map((name) => [
 const launchApprovalsComplete = Object.values(launchApprovals).every(Boolean);
 const registrationRequested = readBooleanSetting('PUBLIC_BETA_REGISTRATION_ENABLED', !productionRuntime);
 const paidPurchasesRequested = readBooleanSetting('PUBLIC_BETA_PAID_PURCHASES_ENABLED', !productionRuntime);
+const passwordResetEmailEnabled = readBooleanSetting('PASSWORD_RESET_EMAIL_ENABLED', false);
+const registrationEmailVerificationEnabled = readBooleanSetting('REGISTRATION_EMAIL_VERIFICATION_ENABLED', false);
+const stagingRestrictedRegistrationEnabled = readBooleanSetting('STAGING_RESTRICTED_REGISTRATION_ENABLED', false);
+const stagingRegistrationInvitationTtlMinutes = Number(process.env.STAGING_REGISTRATION_INVITATION_TTL_MINUTES ?? '120');
+const resendApiKey = process.env.RESEND_API_KEY?.trim() ?? '';
+const passwordResetFromEmail = process.env.PASSWORD_RESET_FROM_EMAIL?.trim() ?? '';
+const passwordResetOtpPepper = process.env.PASSWORD_RESET_OTP_PEPPER?.trim() ?? '';
+const registrationOtpPepper = process.env.REGISTRATION_OTP_PEPPER?.trim() ?? '';
 const configuredRazorpayMode = process.env.RAZORPAY_MODE;
 const razorpayMode = configuredRazorpayMode ?? 'test';
 const razorpayKeyId = process.env.RAZORPAY_KEY_ID ?? '';
@@ -73,6 +81,16 @@ if (['staging', 'production'].includes(appEnv) && nodeEnv !== 'production') {
 if (appEnv === 'staging' && (registrationRequested || paidPurchasesRequested)) {
   throw new Error('Public registration and paid purchases must remain disabled in staging.');
 }
+if (stagingRestrictedRegistrationEnabled && appEnv !== 'staging') {
+  throw new Error('STAGING_RESTRICTED_REGISTRATION_ENABLED may only be enabled when APP_ENV=staging.');
+}
+if (stagingRestrictedRegistrationEnabled && !registrationEmailVerificationEnabled) {
+  throw new Error('REGISTRATION_EMAIL_VERIFICATION_ENABLED must be true when restricted staging registration is enabled.');
+}
+if (!Number.isSafeInteger(stagingRegistrationInvitationTtlMinutes)
+  || stagingRegistrationInvitationTtlMinutes < 5 || stagingRegistrationInvitationTtlMinutes > 1440) {
+  throw new Error('STAGING_REGISTRATION_INVITATION_TTL_MINUTES must be an integer from 5 to 1440.');
+}
 if (nodeEnv === 'production' && !privateStorageDirValue) {
   throw new Error('Set PRIVATE_STORAGE_DIR to an explicit mounted storage path in production.');
 }
@@ -90,6 +108,27 @@ if (productionRuntime && (registrationRequested || paidPurchasesRequested) && !l
 }
 if (productionRuntime && paidPurchasesRequested && appEnv !== 'production') {
   throw new Error('Paid purchases may only be enabled when APP_ENV=production; staging remains test-only.');
+}
+if (passwordResetEmailEnabled || registrationEmailVerificationEnabled) {
+  if (!/^re_[A-Za-z0-9_-]{16,}$/u.test(resendApiKey)) {
+    throw new Error('RESEND_API_KEY must be a valid Resend API key when an email verification feature is enabled.');
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/u.test(passwordResetFromEmail)) {
+    throw new Error('PASSWORD_RESET_FROM_EMAIL must be a valid sender address when an email verification feature is enabled.');
+  }
+}
+if (passwordResetEmailEnabled) {
+  if (Buffer.byteLength(passwordResetOtpPepper, 'utf8') < 32 || passwordResetOtpPepper.startsWith('replace-')) {
+    throw new Error('PASSWORD_RESET_OTP_PEPPER must be a unique secret of at least 32 bytes when password reset email is enabled.');
+  }
+}
+if (registrationEmailVerificationEnabled
+  && (Buffer.byteLength(registrationOtpPepper, 'utf8') < 32 || registrationOtpPepper.startsWith('replace-'))) {
+  throw new Error('REGISTRATION_OTP_PEPPER must be a unique secret of at least 32 bytes when registration email verification is enabled.');
+}
+if (registrationEmailVerificationEnabled && passwordResetOtpPepper
+  && registrationOtpPepper === passwordResetOtpPepper) {
+  throw new Error('REGISTRATION_OTP_PEPPER must be different from PASSWORD_RESET_OTP_PEPPER.');
 }
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -194,6 +233,14 @@ export const env = Object.freeze({
   appEnv,
   publicRegistrationEnabled: registrationRequested && (!productionRuntime || launchApprovalsComplete),
   paidPurchasesEnabled: paidPurchasesRequested && (!productionRuntime || launchApprovalsComplete),
+  passwordResetEmailEnabled,
+  registrationEmailVerificationEnabled,
+  stagingRestrictedRegistrationEnabled,
+  stagingRegistrationInvitationTtlMinutes,
+  registrationOtpPepper,
+  resendApiKey,
+  passwordResetFromEmail,
+  passwordResetOtpPepper,
   mongoUri: configuredMongoUri || 'mongodb://127.0.0.1:27017/nursing_education',
   sessionSecret,
   sessionMaxAgeMs: sessionMaxAgeDays * 24 * 60 * 60 * 1000,

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import Icon from '../Icon.jsx';
 import { adminApi } from '../../services/adminApi.js';
+import AdminRegistrationInvitationPanel from './AdminRegistrationInvitationPanel.jsx';
 
 export default function AdminSettingsPanel({ admin, onLogout }) {
   const [currentPassword, setCurrentPassword] = useState('');
@@ -46,6 +47,7 @@ export default function AdminSettingsPanel({ admin, onLogout }) {
     <section className="admin-resource-panel" aria-labelledby="admin-settings-title">
       <div className="admin-panel-heading"><div><h2 id="admin-settings-title">Settings</h2><p>Review your administrator profile, update your password, and end this admin session securely.</p></div></div>
       <div className="admin-settings-grid">
+        <AdminRegistrationInvitationPanel />
         <article className="admin-settings-card">
           <p className="eyebrow">ADMINISTRATOR PROFILE</p>
           <h3>{admin?.name || 'Administrator'}</h3>

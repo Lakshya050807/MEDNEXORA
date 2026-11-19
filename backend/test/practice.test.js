@@ -12,6 +12,7 @@ const [{ createApp }, session, { default: TestAttempt }, { default: QuestionBank
   import('../src/models/QuestionBank.js'),
   import('../src/models/MockTest.js'),
 ]);
+const { registrationTestAppOptions, withVerifiedRegistration, resetRegistrationTestModels } = await import('./helpers/registration.js');
 
 const examId = '507f1f77bcf86cd799439101';
 const subjectId = '507f1f77bcf86cd799439102';
@@ -157,6 +158,7 @@ class FakeTestAttemptModel {
 }
 
 beforeEach(async () => {
+  resetRegistrationTestModels();
   usersByEmail = new Map();
   usersById = new Map();
   attempts = new Map();
@@ -164,6 +166,7 @@ beforeEach(async () => {
   bank.questions = structuredClone(demoQuestions);
   nextUserId = 1;
   const app = createApp({
+    ...registrationTestAppOptions(),
     sessionStore: new session.MemoryStore(),
     UserModel: FakeUserModel,
     QuestionBankModel: FakeQuestionBankModel,
@@ -193,7 +196,7 @@ async function request(path, { method = 'GET', body, cookie } = {}) {
 }
 
 async function register(name, email) {
-  const result = await request('/api/auth/register', { method: 'POST', body: { name, email, password: 'safe-practice-password-42' } });
+  const result = await request('/api/auth/register', { method: 'POST', body: withVerifiedRegistration({ name, email, password: 'safe-practice-password-42' }) });
   assert.equal(result.response.status, 201);
   return result.cookie;
 }

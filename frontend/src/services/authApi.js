@@ -43,7 +43,11 @@ function postJson(path, body) {
 
 export const authApi = {
   register: (details) => postJson('/auth/register', details),
+  requestRegistrationOtp: (details) => postJson('/auth/registration/request-otp', details),
+  verifyRegistrationOtp: (details) => postJson('/auth/registration/verify-otp', details),
   login: (credentials) => postJson('/auth/login', credentials),
+  requestPasswordReset: (details) => postJson('/auth/password-reset/request', details),
+  completePasswordReset: (details) => postJson('/auth/password-reset/complete', details),
   logout: () => postJson('/auth/logout', {}),
   currentUser: () => request('/auth/me'),
   studentDashboard: () => request('/student/dashboard'),

@@ -1,28 +1,140 @@
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, randomInt } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { clearSessionCookie, destroyStudentSession, regenerateStudentSession } from '../utils/session.js';
 import { toStudentProfile } from '../utils/student.js';
 import { hashPassword, normalizeEmail, passwordValidationMessage, validEmail } from '../utils/credentials.js';
+import {
+  registrationInvitationDigest,
+  registrationInvitationRetentionMs,
+  registrationProofDigest,
+} from '../services/registrationVerification.js';
 
 const dummyPasswordHash = bcrypt.hashSync(randomBytes(32).toString('hex'), 12);
+const passwordResetOtpLifetimeMs = 10 * 60 * 1000;
+const passwordResetResendCooldownMs = 60 * 1000;
+const passwordResetResendWindowMs = 60 * 60 * 1000;
+const passwordResetMaxSendsPerHour = 5;
+const passwordResetMaxVerificationAttempts = 5;
+const passwordResetRequestMessage = 'If an account exists, an email with password reset instructions will be sent.';
+const passwordResetInvalidOtpMessage = 'The code is invalid or expired. Request a new code and try again.';
+const registrationProofInvalidMessage = 'The email verification could not be completed. Request a new code and try again.';
+
+function updateMatched(result) {
+  return (result?.matchedCount ?? result?.n ?? 0) > 0;
+}
+
+function otpDigest(email, otp, pepper) {
+  return createHmac('sha256', pepper).update(`${email}\0${otp}`, 'utf8').digest('hex');
+}
+
+function validOtpPepper(pepper) {
+  return typeof pepper === 'string' && Buffer.byteLength(pepper, 'utf8') >= 32;
+}
+
+function resetOtpFields() {
+  return {
+    passwordResetOtpHash: 1,
+    passwordResetOtpExpiresAt: 1,
+    passwordResetOtpStatus: 1,
+    passwordResetOtpActivationConfirmed: 1,
+    passwordResetOtpAttempts: 1,
+  };
+}
+
+async function reserveResetOtp({ UserModel, email, digest, now }) {
+  const cooldownBefore = new Date(now.getTime() - passwordResetResendCooldownMs);
+  const windowBefore = new Date(now.getTime() - passwordResetResendWindowMs);
+  const accountFilter = { email, role: 'student' };
+  const canSendNow = {
+    $or: [
+      { passwordResetOtpLastSentAt: { $exists: false } },
+      { passwordResetOtpLastSentAt: null },
+      { passwordResetOtpLastSentAt: { $lte: cooldownBefore } },
+    ],
+  };
+  const resetFields = {
+    passwordResetOtpHash: digest,
+    passwordResetOtpExpiresAt: new Date(now.getTime() + passwordResetOtpLifetimeMs),
+    passwordResetOtpStatus: 'pending',
+    passwordResetOtpActivationConfirmed: false,
+    passwordResetOtpAttempts: 0,
+    passwordResetOtpLastSentAt: now,
+  };
+
+  // The expired/missing-window branch starts a new hourly counter atomically.
+  const resetWindow = await UserModel.updateOne({
+    ...accountFilter,
+    $and: [canSendNow, {
+      $or: [
+        { passwordResetOtpResendWindowStartedAt: { $exists: false } },
+        { passwordResetOtpResendWindowStartedAt: null },
+        { passwordResetOtpResendWindowStartedAt: { $lte: windowBefore } },
+      ],
+    }],
+  }, {
+    $set: {
+      ...resetFields,
+      passwordResetOtpResendWindowStartedAt: now,
+      passwordResetOtpResendCount: 1,
+    },
+  }, { runValidators: true, writeConcern: { w: 'majority' } });
+  if (updateMatched(resetWindow)) return true;
+
+  // Current-window sends use an atomic conditional increment, shared by every
+  // backend process through MongoDB rather than process-local state.
+  const currentWindow = await UserModel.updateOne({
+    ...accountFilter,
+    $and: [canSendNow, {
+      passwordResetOtpResendWindowStartedAt: { $gt: windowBefore },
+      $or: [
+        { passwordResetOtpResendCount: { $lt: passwordResetMaxSendsPerHour } },
+        { passwordResetOtpResendCount: { $exists: false } },
+      ],
+    }],
+  }, {
+    $set: resetFields,
+    $inc: { passwordResetOtpResendCount: 1 },
+  }, { runValidators: true, writeConcern: { w: 'majority' } });
+  return updateMatched(currentWindow);
+}
+
+function clearOutstandingOtpUpdate() {
+  return { $unset: resetOtpFields() };
+}
 
 function duplicateEmailError(error) {
   return error?.code === 11000 && (error?.keyPattern?.email || error?.keyValue?.email);
 }
 
-function sendDuplicateEmail(response) {
-  return response.status(409).json({
-    message: 'This email is already registered. Please log in instead.',
-  });
-}
-
-export function createAuthController({ UserModel }) {
+export function createAuthController({
+  UserModel,
+  RegistrationVerificationChallengeModel,
+  registrationEnabled = false,
+  stagingRestrictedRegistrationEnabled = false,
+  registrationEmailVerificationEnabled = false,
+  registrationOtpPepper = '',
+  registrationNow = () => new Date(),
+  emailProvider,
+  passwordResetEmailEnabled = false,
+  passwordResetOtpPepper = '',
+  now = () => new Date(),
+}) {
   return {
     register: async (request, response, next) => {
+      if (!registrationEmailVerificationEnabled || Buffer.byteLength(registrationOtpPepper, 'utf8') < 32) {
+        return response.status(503).json({
+          code: 'PUBLIC_LAUNCH_GATE_CLOSED',
+          message: 'Student registration is temporarily unavailable until email verification is configured.',
+        });
+      }
+
       const body = request.body ?? {};
       const name = typeof body.name === 'string' ? body.name.trim() : '';
       const email = normalizeEmail(body.email);
       const password = typeof body.password === 'string' ? body.password : '';
+      const verificationToken = typeof body.verificationToken === 'string' ? body.verificationToken : '';
+      const invitationToken = typeof body.invitationToken === 'string' ? body.invitationToken.trim() : '';
+      const restrictedRegistration = stagingRestrictedRegistrationEnabled;
 
       const missingFields = [];
       if (!name) missingFields.push('name');
@@ -40,16 +152,83 @@ export function createAuthController({ UserModel }) {
       }
       const passwordError = passwordValidationMessage(password);
       if (passwordError) return response.status(400).json({ message: passwordError });
+      if (!/^[A-Za-z0-9_-]{43}$/u.test(verificationToken)) {
+        return response.status(400).json({ message: registrationProofInvalidMessage });
+      }
+      if (restrictedRegistration && !/^[A-Za-z0-9_-]{43}$/u.test(invitationToken)) {
+        return response.status(400).json({ message: registrationProofInvalidMessage });
+      }
 
       try {
-        if (await UserModel.exists({ email })) return sendDuplicateEmail(response);
+        if (await UserModel.exists({ email })) {
+          return response.status(400).json({ message: registrationProofInvalidMessage });
+        }
 
         const passwordHash = await hashPassword(password);
-        const user = await UserModel.create({ name, email, passwordHash, role: 'student' });
-        await regenerateStudentSession(request, user._id ?? user.id);
+        const consumedAt = registrationNow();
+        const proofDigest = registrationProofDigest(email, verificationToken, registrationOtpPepper);
+        const invitationDigest = restrictedRegistration ? registrationInvitationDigest(invitationToken) : null;
+        let verifiedChallenge = null;
+        const challengeQuery = {
+          email,
+          status: 'verified',
+          verificationProofDigest: proofDigest,
+          expiresAt: { $gt: consumedAt },
+        };
+        if (restrictedRegistration) {
+          const verifiedQuery = RegistrationVerificationChallengeModel.findOne(challengeQuery);
+          verifiedChallenge = await (typeof verifiedQuery?.select === 'function'
+            ? verifiedQuery.select('+invitationId')
+            : verifiedQuery);
+          if (!verifiedChallenge?.invitationId) {
+            return response.status(400).json({ message: registrationProofInvalidMessage });
+          }
+          const invitation = verifiedChallenge.invitations?.find((entry) => String(entry._id) === String(verifiedChallenge.invitationId)
+            && entry.status === 'active' && entry.expiresAt > consumedAt);
+          if (!invitation) return response.status(400).json({ message: registrationProofInvalidMessage });
+          challengeQuery.invitationId = verifiedChallenge.invitationId;
+          challengeQuery.invitations = { $elemMatch: {
+            _id: verifiedChallenge.invitationId,
+            tokenDigest: invitationDigest,
+            status: 'active',
+            expiresAt: { $gt: consumedAt },
+          } };
+        }
+        const consumed = await RegistrationVerificationChallengeModel.updateOne({
+          ...challengeQuery,
+        }, {
+          $set: {
+            status: 'consumed',
+            ...(restrictedRegistration ? {
+              'invitations.$.status': 'consumed',
+              'invitations.$.consumedAt': consumedAt,
+              cleanupAt: new Date(verifiedChallenge.invitations.find((entry) => String(entry._id) === String(verifiedChallenge.invitationId)).expiresAt.getTime() + registrationInvitationRetentionMs),
+            } : {}),
+          },
+          $unset: {
+            verificationProofDigest: 1,
+            otpDigest: 1,
+            activationConfirmed: 1,
+            ...(restrictedRegistration ? { invitationId: 1 } : {}),
+          },
+        }, { runValidators: true, writeConcern: { w: 'majority' } });
+        if ((consumed?.matchedCount ?? consumed?.n ?? 0) === 0) {
+          return response.status(400).json({ message: registrationProofInvalidMessage });
+        }
+
+        const user = await UserModel.create({
+          name,
+          email,
+          passwordHash,
+          role: 'student',
+          emailVerified: true,
+        });
+        await regenerateStudentSession(request, user._id ?? user.id, user.studentSessionVersion);
         return response.status(201).json({ user: toStudentProfile(user) });
       } catch (error) {
-        if (duplicateEmailError(error)) return sendDuplicateEmail(response);
+        if (duplicateEmailError(error)) {
+          return response.status(400).json({ message: registrationProofInvalidMessage });
+        }
         return next(error);
       }
     },
@@ -63,14 +242,14 @@ export function createAuthController({ UserModel }) {
       }
 
       try {
-        const user = await UserModel.findOne({ email }).select('+passwordHash');
+        const user = await UserModel.findOne({ email }).select('+passwordHash +studentSessionVersion');
         const passwordHash = user?.passwordHash ?? dummyPasswordHash;
         const passwordMatches = await bcrypt.compare(password, passwordHash);
         if (!user || !passwordMatches || user.role !== 'student') {
           return response.status(401).json({ message: 'Email or password is incorrect.' });
         }
 
-        await regenerateStudentSession(request, user._id ?? user.id);
+        await regenerateStudentSession(request, user._id ?? user.id, user.studentSessionVersion);
         return response.status(200).json({ user: toStudentProfile(user) });
       } catch (error) {
         return next(error);
@@ -88,5 +267,171 @@ export function createAuthController({ UserModel }) {
     },
 
     profile: (request, response) => response.status(200).json({ user: request.student }),
+
+    requestPasswordReset: async (request, response, next) => {
+      if (!passwordResetEmailEnabled || !validOtpPepper(passwordResetOtpPepper)
+        || typeof emailProvider?.send !== 'function') {
+        return response.status(503).json({ message: 'Password reset is temporarily unavailable.' });
+      }
+
+      const email = normalizeEmail(request.body?.email);
+      if (!validEmail(email)) return response.status(400).json({ message: 'Please enter a valid email address.' });
+
+      const otp = String(randomInt(0, 1_000_000)).padStart(6, '0');
+      const digest = otpDigest(email, otp, passwordResetOtpPepper);
+      const issuedAt = now();
+      try {
+        const reserved = await reserveResetOtp({ UserModel, email, digest, now: issuedAt });
+        if (reserved) {
+          try {
+            const delivery = await emailProvider.send({
+              to: email,
+              subject: 'Your MEDNEXORA password reset code',
+              text: `Your password reset code is ${otp}. It expires in 10 minutes. If you did not request this, you can ignore this email.`,
+            });
+            if (delivery?.sent !== true) throw new Error('Email delivery failed.');
+          } catch {
+            // A challenge is pending and therefore unusable even if this best-
+            // effort cleanup fails. Match the digest so a newer request survives.
+            await UserModel.updateOne({ email, role: 'student', passwordResetOtpHash: digest }, {
+              $unset: resetOtpFields(),
+            }).catch(() => {});
+            return response.status(202).json({ message: passwordResetRequestMessage });
+          }
+
+          try {
+            const activated = await UserModel.updateOne({
+              email,
+              role: 'student',
+              passwordResetOtpHash: digest,
+              passwordResetOtpStatus: 'pending',
+              passwordResetOtpExpiresAt: { $gt: issuedAt },
+            }, { $set: { passwordResetOtpStatus: 'active', passwordResetOtpActivationConfirmed: false } }, {
+              runValidators: true,
+              writeConcern: { w: 'majority' },
+            });
+            if (!updateMatched(activated)) {
+              return response.status(202).json({ message: passwordResetRequestMessage });
+            }
+
+            // This marker is written only after the active transition returned
+            // an acknowledged match. If the activation acknowledgement was
+            // lost, the challenge stays unusable even when rollback cannot run.
+            const confirmed = await UserModel.updateOne({
+              email,
+              role: 'student',
+              passwordResetOtpHash: digest,
+              passwordResetOtpStatus: 'active',
+              passwordResetOtpActivationConfirmed: false,
+              passwordResetOtpExpiresAt: { $gt: now() },
+            }, { $set: { passwordResetOtpActivationConfirmed: true } }, {
+              runValidators: true,
+              writeConcern: { w: 'majority' },
+            });
+            if (!updateMatched(confirmed)) {
+              return response.status(202).json({ message: passwordResetRequestMessage });
+            }
+          } catch {
+            // If the activation write committed but its acknowledgement was
+            // lost, this best-effort rollback may fail. The separate marker is
+            // still false, so completion cannot use that challenge.
+            await UserModel.updateOne({
+              email,
+              role: 'student',
+              passwordResetOtpHash: digest,
+              passwordResetOtpStatus: 'active',
+              passwordResetOtpActivationConfirmed: false,
+            }, {
+              $set: { passwordResetOtpStatus: 'pending', passwordResetOtpActivationConfirmed: false },
+            }, { runValidators: true, writeConcern: { w: 'majority' } }).catch(() => {});
+          }
+        }
+        return response.status(202).json({ message: passwordResetRequestMessage });
+      } catch (error) {
+        return next(error);
+      }
+    },
+
+    completePasswordReset: async (request, response, next) => {
+      if (!passwordResetEmailEnabled || !validOtpPepper(passwordResetOtpPepper)) {
+        return response.status(503).json({ message: 'Password reset is temporarily unavailable.' });
+      }
+
+      const body = request.body ?? {};
+      const email = normalizeEmail(body.email);
+      const otp = typeof body.otp === 'string' ? body.otp.trim() : '';
+      const newPassword = typeof body.newPassword === 'string' ? body.newPassword : '';
+      const confirmPassword = typeof body.confirmPassword === 'string' ? body.confirmPassword : '';
+      const missing = [];
+      if (!email) missing.push('email address');
+      if (!otp) missing.push('verification code');
+      if (!newPassword) missing.push('new password');
+      if (!confirmPassword) missing.push('confirm password');
+      if (missing.length) return response.status(400).json({ message: `Missing required fields: ${missing.join(', ')}.` });
+      if (!validEmail(email)) return response.status(400).json({ message: 'Please enter a valid email address.' });
+      if (!/^\d{6}$/u.test(otp)) return response.status(400).json({ message: passwordResetInvalidOtpMessage });
+      const passwordError = passwordValidationMessage(newPassword);
+      if (passwordError) return response.status(400).json({ message: passwordError });
+      if (newPassword !== confirmPassword) return response.status(400).json({ message: 'The passwords do not match.' });
+
+      try {
+        const digest = otpDigest(email, otp, passwordResetOtpPepper);
+        const passwordHash = await hashPassword(newPassword);
+        const completedAt = now();
+        const completed = await UserModel.updateOne({
+          email,
+          role: 'student',
+          passwordResetOtpHash: digest,
+          passwordResetOtpStatus: 'active',
+          passwordResetOtpActivationConfirmed: true,
+          passwordResetOtpExpiresAt: { $gt: completedAt },
+          passwordResetOtpAttempts: { $lt: passwordResetMaxVerificationAttempts },
+        }, {
+          $set: { passwordHash },
+          $inc: { studentSessionVersion: 1 },
+          // Keep send-window counters so a successful reset cannot bypass the
+          // per-account cooldown or hourly email cap.
+          $unset: clearOutstandingOtpUpdate().$unset,
+        }, { runValidators: true, writeConcern: { w: 'majority' } });
+
+        if (updateMatched(completed)) {
+          return response.status(200).json({ message: 'Your password has been reset. Please log in with your new password.' });
+        }
+
+        const invalidAttemptFilter = {
+          email,
+          role: 'student',
+          passwordResetOtpHash: { $exists: true },
+          passwordResetOtpStatus: 'active',
+          passwordResetOtpActivationConfirmed: true,
+          passwordResetOtpExpiresAt: { $gt: completedAt },
+          passwordResetOtpAttempts: { $lt: passwordResetMaxVerificationAttempts },
+        };
+        const attempts = await UserModel.updateOne({
+          ...invalidAttemptFilter,
+          passwordResetOtpAttempts: { $lt: passwordResetMaxVerificationAttempts - 1 },
+        }, { $inc: { passwordResetOtpAttempts: 1 } }, { runValidators: true });
+        if (!updateMatched(attempts)) {
+          // On the fifth incorrect code, atomically lock and invalidate the
+          // challenge. Correct and incorrect concurrent submissions serialize
+          // against the same challenge fields in MongoDB.
+          await UserModel.updateOne({
+            ...invalidAttemptFilter,
+            passwordResetOtpAttempts: passwordResetMaxVerificationAttempts - 1,
+          }, {
+            $set: { passwordResetOtpAttempts: passwordResetMaxVerificationAttempts },
+            $unset: {
+              passwordResetOtpHash: 1,
+              passwordResetOtpExpiresAt: 1,
+              passwordResetOtpStatus: 1,
+              passwordResetOtpActivationConfirmed: 1,
+            },
+          }, { runValidators: true });
+        }
+        return response.status(400).json({ message: passwordResetInvalidOtpMessage });
+      } catch (error) {
+        return next(error);
+      }
+    },
   };
 }

@@ -1735,6 +1735,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .auth-field { color: var(--deep-emerald); font-size: 12px; }
 .auth-field input { border-color: var(--muted-border); border-radius: 9px; background: var(--white); color: var(--deep-emerald); font-size: 14px; }
 .auth-field input:focus { border-color: var(--royal-gold); box-shadow: 0 0 0 3px rgba(221, 169, 30, .18); }
+.auth-forgot-link { justify-self: end; margin-top: -7px; color: #73570A; font-size: 12px; font-weight: 750; text-underline-offset: 3px; }
+.auth-forgot-link:hover, .auth-resend-button:hover { color: var(--deep-emerald); text-decoration: underline; }
+.auth-feedback { margin: 0; padding: 11px 12px; border: 1px solid #BFD7C7; border-radius: 9px; color: #21583C; background: #EDF5EF; font-size: 13px; line-height: 1.55; }
+.auth-field-hint { color: #5A6B60; font-size: 12px; font-weight: 500; line-height: 1.5; }
+.auth-resend-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 9px 14px; margin-top: 15px; color: #596A60; font-size: 12px; }
+.auth-resend-button { min-height: 40px; padding: 7px 0; border: 0; color: #73570A; background: transparent; font: inherit; font-weight: 750; text-align: left; cursor: pointer; }
+.auth-resend-button:disabled { color: #758178; cursor: wait; text-decoration: none; }
+.auth-reset-success { display: grid; gap: 17px; }
+.auth-reset-success .auth-submit { width: 100%; display: flex; align-items: center; justify-content: center; }
 .auth-page-footer { color: var(--muted-on-dark); font-size: 10px; }
 .practice-heading h1 span { color: var(--teal-dark); }
 .practice-heading > p:last-child, .practice-content-note { font-size: 13px; }

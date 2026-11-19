@@ -11,6 +11,7 @@ const [{ createApp }, session, { default: CourseProgress }, { default: Course }]
   import('../src/models/CourseProgress.js'),
   import('../src/models/Course.js'),
 ]);
+const { registrationTestAppOptions, withVerifiedRegistration, resetRegistrationTestModels } = await import('./helpers/registration.js');
 
 const examId = '507f1f77bcf86cd799439201';
 const subjectId = '507f1f77bcf86cd799439202';
@@ -160,12 +161,14 @@ class FakeCourseProgressModel {
 }
 
 beforeEach(async () => {
+  resetRegistrationTestModels();
   usersByEmail = new Map();
   usersById = new Map();
   accesses = [];
   savedProgress = [];
   nextUserId = 1;
   const app = createApp({
+    ...registrationTestAppOptions(),
     sessionStore: new session.MemoryStore(),
     UserModel: FakeUserModel,
     ExamModel: FakeExamModel,
@@ -193,7 +196,7 @@ async function request(path, { method = 'GET', body, cookie } = {}) {
 }
 
 async function register(email) {
-  const result = await request('/api/auth/register', { method: 'POST', body: { name: 'Course Student', email, password: 'safe-course-password-42' } });
+  const result = await request('/api/auth/register', { method: 'POST', body: withVerifiedRegistration({ name: 'Course Student', email, password: 'safe-course-password-42' }) });
   assert.equal(result.response.status, 201);
   return result.cookie;
 }

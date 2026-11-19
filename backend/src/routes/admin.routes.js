@@ -5,19 +5,56 @@ import { createAdminAuthController } from '../controllers/admin-auth.controller.
 import { requireAdminAuth } from '../middleware/requireAdminAuth.js';
 import { verifyOrigin } from '../middleware/verifyOrigin.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
+import { createMongoRateLimiter } from '../middleware/mongoRateLimit.js';
 import { createAdminUploadController } from '../controllers/admin-upload.controller.js';
+import { createStagingRegistrationInvitationController } from '../controllers/staging-registration-invitation.controller.js';
 
-export function createAdminRoutes({ UserModel, OrderModel, RefundModel, privateStorageDir, PurchasedAccessModel, CourseProgressModel, ...catalogModels }) {
+export function createAdminRoutes({
+  UserModel,
+  OrderModel,
+  RefundModel,
+  privateStorageDir,
+  PurchasedAccessModel,
+  CourseProgressModel,
+  RegistrationVerificationChallengeModel,
+  PasswordResetRateLimitModel,
+  passwordResetRateLimitSecret,
+  stagingRestrictedRegistrationEnabled = false,
+  stagingRegistrationInvitationTtlMinutes = 120,
+  stagingRegistrationNow,
+  ...catalogModels
+}) {
   const router = Router();
   const controller = createCatalogController({ ...catalogModels, OrderModel, PurchasedAccessModel });
   const adminController = createAdminController({ UserModel, OrderModel, RefundModel, PurchasedAccessModel, CourseProgressModel, ...catalogModels });
   const adminAuth = createAdminAuthController({ UserModel });
   const uploads = createAdminUploadController({ privateStorageDir });
+  const registrationInvitations = createStagingRegistrationInvitationController({
+    UserModel,
+    ChallengeModel: RegistrationVerificationChallengeModel,
+    enabled: stagingRestrictedRegistrationEnabled,
+    ttlMinutes: stagingRegistrationInvitationTtlMinutes,
+    now: stagingRegistrationNow,
+  });
   router.use(createRateLimiter({ windowMs: 60 * 1000, max: 300 }));
   const adminLoginLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 5 });
   router.post('/login', verifyOrigin, adminLoginLimiter, adminAuth.login);
   router.post('/logout', verifyOrigin, adminAuth.logout);
   router.use(requireAdminAuth({ UserModel }));
+  const stagingInvitationsUnavailable = (_request, response, next) => stagingRestrictedRegistrationEnabled
+    ? next()
+    : response.status(404).json({ message: 'The requested admin resource was not found.' });
+  const invitationWriteLimiter = createMongoRateLimiter({
+    RateLimitModel: PasswordResetRateLimitModel,
+    secret: passwordResetRateLimitSecret,
+    scope: 'staging-invitation-write',
+    windowMs: 60 * 60 * 1000,
+    max: 10,
+    unavailableMessage: 'Invitation management is temporarily unavailable.',
+  });
+  router.get('/staging-registration-invitations', stagingInvitationsUnavailable, registrationInvitations.list);
+  router.post('/staging-registration-invitations', stagingInvitationsUnavailable, verifyOrigin, invitationWriteLimiter, registrationInvitations.issue);
+  router.delete('/staging-registration-invitations/:invitationId', stagingInvitationsUnavailable, verifyOrigin, invitationWriteLimiter, registrationInvitations.revoke);
   router.post('/uploads/pdf', verifyOrigin, createRateLimiter({ windowMs: 60 * 1000, max: 10 }), express.raw({ type: 'application/pdf', limit: '50mb' }), uploads.uploadPdf);
   router.get('/me', adminAuth.profile);
   router.post('/password', verifyOrigin, createRateLimiter({ windowMs: 15 * 60 * 1000, max: 5 }), adminAuth.changePassword);

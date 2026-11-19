@@ -11,6 +11,7 @@ const [{ createApp }, session, bcrypt] = await Promise.all([
   import('express-session'),
   import('bcryptjs'),
 ]);
+const { registrationTestAppOptions, withVerifiedRegistration, resetRegistrationTestModels } = await import('./helpers/registration.js');
 
 const studentOneId = '507f1f77bcf86cd799439201';
 const studentTwoId = '507f1f77bcf86cd799439202';
@@ -267,6 +268,7 @@ const paymentGateway = {
 const paymentConfig = { keyId: 'rzp_test_public_key', keySecret, webhookSecret, mode: 'test' };
 
 beforeEach(async () => {
+  resetRegistrationTestModels();
   usersByEmail = new Map();
   usersById = new Map();
   orders = new Map();
@@ -278,6 +280,7 @@ beforeEach(async () => {
   orderCounter = 1;
   gatewayCreateCount = 0;
   server = createApp({
+    ...registrationTestAppOptions(),
     sessionStore: new session.MemoryStore(),
     UserModel: FakeUserModel,
     ProductModel: FakeProductModel,
@@ -314,7 +317,7 @@ async function requestAt(url, path, { method = 'GET', body, rawBody, cookie, hea
 }
 
 async function registerAndLogin(email = 'student@example.com') {
-  const registration = await request('/api/auth/register', { method: 'POST', body: { name: 'Nursing Student', email, password: 'entrance-prep-password-55' } });
+  const registration = await request('/api/auth/register', { method: 'POST', body: withVerifiedRegistration({ name: 'Nursing Student', email, password: 'entrance-prep-password-55' }) });
   assert.equal(registration.response.status, 201);
   const login = await request('/api/auth/login', { method: 'POST', body: { email, password: 'entrance-prep-password-55' } });
   assert.equal(login.response.status, 200);
@@ -334,6 +337,7 @@ function checkoutSignature(orderId, paymentId) {
 
 test('paid-purchase gate blocks new checkout without blocking launch status or payment verification, reconciliation, and webhooks', async () => {
   const gatedApp = createApp({
+    ...registrationTestAppOptions(),
     sessionStore: new session.MemoryStore(),
     UserModel: FakeUserModel,
     ProductModel: FakeProductModel,
@@ -357,7 +361,7 @@ test('paid-purchase gate blocks new checkout without blocking launch status or p
 
     const registration = await requestAt(gatedUrl, '/api/auth/register', {
       method: 'POST',
-      body: { name: 'Gate Test Student', email: 'gate-test@example.com', password: 'gate-test-student-password-42' },
+      body: withVerifiedRegistration({ name: 'Gate Test Student', email: 'gate-test@example.com', password: 'gate-test-student-password-42' }),
     });
     assert.equal(registration.response.status, 201);
     const login = await requestAt(gatedUrl, '/api/auth/login', {

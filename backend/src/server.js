@@ -17,6 +17,8 @@ import PurchasedAccess from './models/PurchasedAccess.js';
 import CourseProgress from './models/CourseProgress.js';
 import PaymentWebhookEvent from './models/PaymentWebhookEvent.js';
 import PaymentRefund from './models/PaymentRefund.js';
+import PasswordResetRateLimit from './models/PasswordResetRateLimit.js';
+import RegistrationVerificationChallenge from './models/RegistrationVerificationChallenge.js';
 import { ensurePrimaryExamIndex } from './db/ensure-primary-exam-index.js';
 
 async function ensurePurchaseReservationBackfill(OrderModel) {
@@ -38,7 +40,7 @@ async function startServer() {
   await ensurePurchaseReservationBackfill(Order);
   await Promise.all([
     User.init(), Exam.init(), Subject.init(), Chapter.init(), Topic.init(), StudyMaterial.init(), Course.init(),
-    QuestionBank.init(), MockTest.init(), TestAttempt.init(), Order.init(), PurchasedAccess.init(), CourseProgress.init(), PaymentWebhookEvent.init(), PaymentRefund.init(),
+    QuestionBank.init(), MockTest.init(), TestAttempt.init(), Order.init(), PurchasedAccess.init(), CourseProgress.init(), PaymentWebhookEvent.init(), PaymentRefund.init(), PasswordResetRateLimit.init(), RegistrationVerificationChallenge.init(),
   ]);
 
   const sessionStore = MongoStore.create({

@@ -147,3 +147,5 @@ Razorpay payment IDs and signature inputs are verified using the order reference
 
 From `backend/`, run `npm test`. Auth, admin and catalogue API tests use an isolated in-memory session store and model fakes; schema validation tests do not require a running MongoDB instance.
 
+Registration email OTP and restricted staging invitations are disabled unless explicitly configured. Review [REGISTRATION_EMAIL_VERIFICATION_STAGING.md](REGISTRATION_EMAIL_VERIFICATION_STAGING.md) before any staging email test. Public registration and paid purchases remain separately gated and must stay disabled in staging.
+

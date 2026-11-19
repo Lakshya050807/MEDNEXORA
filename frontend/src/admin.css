@@ -234,6 +234,16 @@
 .admin-settings-card .admin-primary-button { color: var(--deep-emerald); background: var(--champagne-gold); }
 .admin-settings-card .admin-primary-button:hover { background: var(--royal-gold); }
 .admin-settings-card .admin-secondary-button { border-color: var(--gold-border); color: var(--deep-emerald); }
+.admin-registration-invitations { grid-column: 1 / -1; }
+.admin-invitation-token { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--gold-border); border-radius: 10px; background: #fbf8ec; }
+.admin-invitation-token p { margin: 0; color: var(--text-on-light); font-size: 12px; }
+.admin-invitation-token code { display: block; max-width: 100%; padding: 11px; border-radius: 7px; background: var(--deep-emerald); color: var(--warm-ivory); font-size: 13px; overflow-wrap: anywhere; user-select: all; }
+.admin-invitation-list { display: grid; gap: 8px; min-width: 0; }
+.admin-invitation-list h4 { margin: 4px 0; color: var(--deep-emerald); font-size: 13px; }
+.admin-invitation-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 11px 0; border-top: 1px solid var(--muted-border); }
+.admin-invitation-row > div { display: grid; gap: 4px; min-width: 0; }
+.admin-invitation-row strong { overflow-wrap: anywhere; color: var(--deep-emerald); font-size: 12px; }
+.admin-invitation-row span { color: #64776B; font-size: 11px; }
 
 @media (max-width: 900px) {
   .admin-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

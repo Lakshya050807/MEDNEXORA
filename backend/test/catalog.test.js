@@ -18,6 +18,7 @@ const [{ createApp }, session, bcrypt, { default: StudyMaterial }, { default: Ex
   import('../src/models/Order.js'),
   import('../src/models/PurchasedAccess.js'),
 ]);
+const { registrationTestAppOptions, withVerifiedRegistration, resetRegistrationTestModels } = await import('./helpers/registration.js');
 
 const examId = '507f1f77bcf86cd799439011';
 const subjectId = '507f1f77bcf86cd799439012';
@@ -115,6 +116,7 @@ class EmptyModel {}
 let origin;
 
 beforeEach(async () => {
+  resetRegistrationTestModels();
   usersByEmail = new Map();
   usersById = new Map();
   productFilters = null;
@@ -124,6 +126,7 @@ beforeEach(async () => {
   detailFilter = null;
   examListFilter = null;
   const app = createApp({
+    ...registrationTestAppOptions(),
     sessionStore: new session.MemoryStore(),
     UserModel: FakeUserModel,
     ProductModel: FakeProductModel,
@@ -227,7 +230,7 @@ test('admin mutations require a server-authenticated administrator role', async 
 
   const registration = await request('/api/auth/register', {
     method: 'POST',
-    body: { name: 'Catalog Student', email: 'catalog@example.com', password: 'a-safe-student-password' },
+    body: withVerifiedRegistration({ name: 'Catalog Student', email: 'catalog@example.com', password: 'a-safe-student-password' }),
   });
   assert.equal(registration.response.status, 201);
   const studentMutation = await request('/api/admin/products', { method: 'POST', cookie: registration.cookie, body: { title: 'Test' } });

@@ -68,3 +68,33 @@ test('authentication and dashboard requests bypass the browser HTTP cache', asyn
   assert.ok(calls.every((call) => call.options.cache === 'no-store'));
   assert.ok(calls.every((call) => call.options.credentials === 'same-origin'));
 });
+
+test('registration OTP API methods use same-origin relative URLs, credentials, and no-store', async (t) => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    calls.push({ url: String(url), options, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ message: 'If this email address can be used for registration, a verification code will be sent.' }), {
+      status: 202,
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+
+  await authApi.requestRegistrationOtp({ email: 'student@example.test' });
+  await authApi.verifyRegistrationOtp({ email: 'student@example.test', otp: '012345' });
+  await authApi.register({
+    name: 'Student Example',
+    email: 'student@example.test',
+    password: 'safe-student-password-2026',
+    verificationToken: 'A'.repeat(43),
+  });
+
+  assert.deepEqual(calls.map(({ url }) => url), [
+    '/api/auth/registration/request-otp',
+    '/api/auth/registration/verify-otp',
+    '/api/auth/register',
+  ]);
+  assert.ok(calls.every(({ options }) => options.credentials === 'same-origin' && options.cache === 'no-store'));
+  assert.deepEqual(calls[0].body, { email: 'student@example.test' });
+  assert.equal(calls[1].body.otp, '012345');
+  assert.equal(calls[2].body.verificationToken.length, 43);
+});

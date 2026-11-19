@@ -7,6 +7,7 @@ const metadata = {
   '/terms-and-conditions': ['Terms and Conditions — MEDNEXORA', 'Draft terms page requiring owner and legal review before public launch.'],
   '/refund-cancellation-policy': ['Refund and Cancellation Policy — MEDNEXORA', 'Draft refund and cancellation policy awaiting owner confirmation.'],
   '/login': ['Student Login — MEDNEXORA', 'Sign in to your MEDNEXORA student account.'],
+  '/forgot-password': ['Reset Your Password — MEDNEXORA', 'Request a password reset code for your MEDNEXORA student account.'],
   '/register': ['Create a Student Account — MEDNEXORA', 'Create a student account to use MEDNEXORA study and practice resources.'],
   '/admin/login': ['Admin Login — MEDNEXORA', 'Administrator access for the MEDNEXORA content workspace.'],
   '/admin': ['Admin Workspace — MEDNEXORA', 'Manage MEDNEXORA educational content and platform records.'],
@@ -32,7 +33,7 @@ export function pageMetadataFor(pathname = '/') {
 function isPrivatePath(path) {
   return /^\/(?:admin|student|my-courses|orders|cart|practice)(?:\/|$)/u.test(path)
     || /^\/courses\/[^/]+\/learn$/u.test(path)
-    || path === '/login' || path === '/register';
+    || path === '/login' || path === '/register' || path === '/forgot-password';
 }
 
 function isUnconfirmedPage(path) {

@@ -76,6 +76,7 @@ export default function LoginPage({ required = false }) {
           <input id="login-password" name="password" type="password" autoComplete="current-password" maxLength={72} value={password} onChange={(event) => setPassword(event.target.value)} aria-invalid={Boolean(fieldErrors.password)} aria-describedby={fieldErrors.password ? 'login-password-error' : undefined} />
           {fieldErrors.password && <small id="login-password-error" className="field-error">{fieldErrors.password}</small>}
         </label>
+        <a className="auth-forgot-link" href="/forgot-password">Forgot password?</a>
         <button className="auth-submit" type="submit" disabled={submitting}>{submitting ? 'Signing in…' : 'Log in'} <Icon name="arrow" size={17} /></button>
       </form>
     </AuthPageShell>

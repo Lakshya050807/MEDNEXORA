@@ -335,6 +335,19 @@ test('admin login requires a provisioned database role and every admin API check
   assert.equal('passwordHash' in profile.payload.user, false);
 });
 
+test('student session-version changes do not invalidate administrator sessions', async () => {
+  const adminCookie = await loginAdmin();
+  const admin = users.find((user) => user.email === 'admin@example.com');
+  const profileBefore = await request('/api/admin/me', { cookie: adminCookie });
+  assert.equal(profileBefore.response.status, 200);
+
+  admin.studentSessionVersion = 99;
+  const profileAfter = await request('/api/admin/me', { cookie: adminCookie });
+  assert.equal(profileAfter.response.status, 200);
+  assert.equal(profileAfter.payload.user.email, 'admin@example.com');
+  assert.equal(admin.adminSessionVersion ?? 0, 0, 'administrator sessions continue using their separate version field');
+});
+
 test('admin login rejects incorrect usernames and passwords with the same safe response', async () => {
   const unknownUsername = await request('/api/admin/login', { method: 'POST', body: { username: 'missing-admin', password: 'admin-secret-password-123' } });
   const wrongPassword = await request('/api/admin/login', { method: 'POST', body: { username: 'admin@example.com', password: 'wrong-admin-password-123' } });
