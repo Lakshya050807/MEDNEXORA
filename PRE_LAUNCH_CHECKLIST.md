@@ -4,11 +4,14 @@
 
 ## Domain
 
-- [ ] [OWNER] Select and confirm the public domain; no domain is configured by this project.
-- [ ] [PRODUCTION] Point DNS to the chosen hosting provider.
-- [ ] [PRODUCTION] Provision HTTPS and verify HTTP redirects to HTTPS.
-- [ ] [PRODUCTION] Set frontend `PUBLIC_SITE_URL` and backend `APP_ORIGIN` to the exact confirmed origin.
-- [ ] [PRODUCTION] Rebuild and verify canonical URLs, sitemap locations and `robots.txt` on the deployed domain.
+- [x] [OWNER] Domain purchased: `mednexora.site`. Purchase does not mean it is assigned or DNS/TLS is configured.
+- [ ] [OWNER] Confirm apex canonical domain (`https://mednexora.site`) and `www.mednexora.site` redirect to apex. The current Vercel config expects apex; changing the canonical choice needs a reviewed code/config change.
+- [ ] [PRODUCTION] Add apex and `www` only to the existing production Vercel project; apply exact DNS records shown by Vercel at the registrar. Keep both off staging.
+- [ ] [PRODUCTION] Verify Vercel domain ownership, DNS, TLS and HTTP-to-HTTPS behavior for both hostnames; configure `www` → apex redirect.
+- [ ] [PRODUCTION] Set frontend `PUBLIC_SITE_URL=https://mednexora.site` and backend `APP_ORIGIN=https://mednexora.site` only after the domains and HTTPS are verified.
+- [ ] [PRODUCTION] Rebuild and verify canonical URLs, sitemap locations and `robots.txt` on the deployed apex domain. Sitemap currently contains static routes only.
+- [ ] [OWNER] Choose whether to verify `mail.mednexora.site` as the transactional email sending subdomain; this is a proposal, not a verified domain.
+- [ ] [PRODUCTION] Add the chosen sending domain in Resend, publish its exact dashboard-provided SPF/DKIM/verification records, choose an owner-approved DMARC monitoring/reporting setup, and confirm domain verification in Resend. Do not enable email features until separately approved.
 
 ## Hosting
 
@@ -42,7 +45,7 @@
 
 ## Frontend
 
-- [x] [LOCAL] Previous release check: production frontend build passed; build omitted sitemap because the real `PUBLIC_SITE_URL` was not supplied.
+- [ ] [LOCAL] Re-run frontend build with `PUBLIC_SITE_URL=https://mednexora.site` after domain assignment; do not generate or submit a production sitemap before domain verification.
 - [ ] [PRODUCTION] Set `PUBLIC_SITE_URL` to the confirmed HTTPS origin and rebuild.
 - [ ] [PRODUCTION] Deploy only `frontend/dist`.
 - [ ] [PRODUCTION] Verify browser requests use same-origin `/api` and no localhost API address appears in the production bundle.
@@ -80,8 +83,8 @@
 - [x] [LOCAL] Production config rejects missing/test Razorpay mode, weak session secret, non-HTTPS origin and unsafe proxy syntax in automated tests.
 - [x] [LOCAL] Private PDF authorization, ownership and unpublished-content protections have automated backend coverage.
 - [ ] [PRODUCTION] Confirm `.env` files are not committed; Git history was not available in the current workspace for inspection.
-- [ ] [PRODUCTION] Verify only trusted proxy networks are accepted and forwarded headers are overwritten at the edge.
-- [ ] [PRODUCTION] Confirm static-host CSP, HSTS, no-sniff and frame restrictions are active.
+- [ ] [PRODUCTION] Confirm Railway has exactly the assumed trusted ingress hop, does not expose the app directly, and replaces client-supplied `X-Forwarded-For` / `X-Forwarded-Proto` before enabling `TRUST_PROXY=1`. The repository cannot verify this live behavior; use a reviewed staging-only diagnostic or written Railway configuration confirmation, and never expose raw client IPs in a public endpoint.
+- [ ] [PRODUCTION] Verify active Vercel CSP, HSTS, no-sniff and frame restrictions in browser/network tools; local configuration tests do not prove deployed headers or CSP compatibility.
 - [ ] [PRODUCTION] Review host access logs, error reporting and rate limits across all API instances.
 
 ## Student registration and login
@@ -125,6 +128,10 @@
 
 ## Local automated verification
 
-- [x] [LOCAL] Backend suite: 126 tests passed in the latest recorded run.
-- [x] [LOCAL] Frontend suite: 17 Node tests and 50 component tests passed in the latest recorded run.
-- [x] [LOCAL] Production frontend build passed; configure `PUBLIC_SITE_URL` to generate the production sitemap.
+- [x] [LOCAL] Backend suite: 228 passed, 0 failed.
+- [x] [LOCAL] Isolated MongoDB integration suite: 12 passed, 0 failed; test guard uses only a disposable localhost MongoMemoryServer and clears `MONGODB_URI`.
+- [x] [LOCAL] Focused authentication, admin authorization, OTP, Mongo rate-limit and payment/refund tests: 137 passed, 0 failed.
+- [x] [LOCAL] Frontend Node tests: 31 passed; Vitest component suite: 72 passed; 0 failed.
+- [x] [LOCAL] Vite production bundle build passed to a fresh temporary output directory; existing `frontend/dist` was preserved. No sitemap was generated because the production domain has not been verified.
+- [x] [LOCAL] `npm audit` after the targeted body-parser lockfile patch: backend 0 advisories; frontend 0 advisories.
+- [x] [LOCAL] `git diff --check` passed.

@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import mongoose from 'mongoose';
+import { findProductAccessRevocation } from '../services/productAccessRevocation.js';
 
 function idOf(value) {
   if (value && typeof value.toHexString === 'function') return value.toHexString();
@@ -64,6 +65,7 @@ export function createPaymentController({
   OrderModel,
   ProductModel,
   PurchasedAccessModel,
+  ProductAccessRevocationModel,
   WebhookEventModel,
   RefundModel,
   gateway,
@@ -170,39 +172,145 @@ export function createPaymentController({
   }
 
   async function ensureEntitlement(studentId, productId, orderId) {
+    if (!ProductAccessRevocationModel?.findOne) {
+      throw apiError(503, 'Product access verification is temporarily unavailable.');
+    }
+    const existingRevocation = await findProductAccessRevocation({
+      Model: ProductAccessRevocationModel,
+      orderId,
+      productId,
+    });
+    if (existingRevocation) {
+      // The durable decision is authoritative even if an old active row
+      // remains. Repair the denormalized row opportunistically before return.
+      await PurchasedAccessModel.updateMany(
+        { order: orderId, student: studentId, product: productId, source: 'purchase', status: 'active' },
+        { $set: { status: 'revoked', revokedAt: existingRevocation.recordedAt ?? clock() } },
+        { writeConcern: { w: 'majority' } },
+      );
+      return false;
+    }
     const filter = { student: studentId, product: productId };
     const current = await runQuery(PurchasedAccessModel.findOne(filter));
-    if (current?.status === 'active') return;
+    if (current?.status === 'active') {
+      const confirmedRevocation = await findProductAccessRevocation({ Model: ProductAccessRevocationModel, orderId, productId });
+      if (!confirmedRevocation) return true;
+      await PurchasedAccessModel.updateMany(
+        { order: orderId, student: studentId, product: productId, source: 'purchase', status: 'active' },
+        { $set: { status: 'revoked', revokedAt: confirmedRevocation.recordedAt ?? clock() } },
+        { writeConcern: { w: 'majority' } },
+      );
+      return false;
+    }
     const values = { order: orderId, source: 'purchase', status: 'active', grantedAt: clock(), revokedAt: null };
     if (current) {
       const restored = await PurchasedAccessModel.findOneAndUpdate(
         { ...filter, status: current.status }, { $set: values }, { new: true, runValidators: true },
       );
-      if (restored) return;
+      if (restored) {
+        const confirmedRevocation = await findProductAccessRevocation({ Model: ProductAccessRevocationModel, orderId, productId });
+        if (!confirmedRevocation) return true;
+        await PurchasedAccessModel.updateMany(
+          { order: orderId, student: studentId, product: productId, source: 'purchase', status: 'active' },
+          { $set: { status: 'revoked', revokedAt: confirmedRevocation.recordedAt ?? clock() } },
+          { writeConcern: { w: 'majority' } },
+        );
+        return false;
+      }
       const latest = await runQuery(PurchasedAccessModel.findOne(filter));
-      if (latest?.status === 'active') return;
+      if (latest?.status === 'active') {
+        const confirmedRevocation = await findProductAccessRevocation({ Model: ProductAccessRevocationModel, orderId, productId });
+        if (!confirmedRevocation) return true;
+        await PurchasedAccessModel.updateMany(
+          { order: orderId, student: studentId, product: productId, source: 'purchase', status: 'active' },
+          { $set: { status: 'revoked', revokedAt: confirmedRevocation.recordedAt ?? clock() } },
+          { writeConcern: { w: 'majority' } },
+        );
+        return false;
+      }
     }
     try {
       await PurchasedAccessModel.create({ ...filter, ...values });
+      const confirmedRevocation = await findProductAccessRevocation({ Model: ProductAccessRevocationModel, orderId, productId });
+      if (!confirmedRevocation) return true;
+      await PurchasedAccessModel.updateMany(
+        { order: orderId, student: studentId, product: productId, source: 'purchase', status: 'active' },
+        { $set: { status: 'revoked', revokedAt: confirmedRevocation.recordedAt ?? clock() } },
+        { writeConcern: { w: 'majority' } },
+      );
+      return false;
     } catch (error) {
       if (error?.code !== 11000) throw error;
       const latest = await runQuery(PurchasedAccessModel.findOne(filter));
-      if (latest?.status === 'active') return;
+      if (latest?.status === 'active') {
+        const confirmedRevocation = await findProductAccessRevocation({ Model: ProductAccessRevocationModel, orderId, productId });
+        if (!confirmedRevocation) return true;
+        await PurchasedAccessModel.updateMany(
+          { order: orderId, student: studentId, product: productId, source: 'purchase', status: 'active' },
+          { $set: { status: 'revoked', revokedAt: confirmedRevocation.recordedAt ?? clock() } },
+          { writeConcern: { w: 'majority' } },
+        );
+        return false;
+      }
       throw error;
     }
   }
 
   async function revokeOrderAccess(orderId) {
-    if (typeof PurchasedAccessModel.updateMany !== 'function') return;
+    if (typeof PurchasedAccessModel.updateMany !== 'function') {
+      throw apiError(503, 'Refund access reconciliation is unavailable. Retry safely.');
+    }
     await PurchasedAccessModel.updateMany(
       { order: orderId, source: 'purchase', status: 'active' },
       { $set: { status: 'revoked', revokedAt: clock() } },
+      { runValidators: true, writeConcern: { w: 'majority' } },
     );
   }
 
   async function setRefundReconciliation(refund, status) {
-    await RefundModel.updateOne({ _id: refund._id }, { $set: { reconciliationStatus: status } });
+    const result = await RefundModel.updateOne({ _id: refund._id }, { $set: { reconciliationStatus: status } }, { writeConcern: { w: 'majority' } });
+    if (result?.matchedCount === 0) throw apiError(503, 'Refund reconciliation could not be confirmed. Retry safely.');
     refund.reconciliationStatus = status;
+  }
+
+  async function releaseRefundedOrderReservation(order) {
+    if (order.status !== 'refunded' || order.reservationStatus !== 'active') return order;
+    if (!order.student || !Array.isArray(order.reservationProductIds) || order.reservationProductIds.length === 0) {
+      throw apiError(503, 'Refund reservation reconciliation is unavailable. Retry safely.');
+    }
+
+    const filter = {
+      _id: order._id,
+      student: order.student,
+      status: 'refunded',
+      reservationStatus: 'active',
+      reservationProductIds: order.reservationProductIds,
+    };
+    const released = await OrderModel.findOneAndUpdate(filter, {
+      $set: { reservationStatus: 'released', reservationExpiresAt: null },
+    }, { returnDocument: 'after', runValidators: true, writeConcern: { w: 'majority' } });
+    if (released) return released;
+
+    const latest = await runQuery(OrderModel.findById(order._id));
+    if (latest?.status === 'refunded' && latest.reservationStatus !== 'active') return latest;
+    throw apiError(503, 'Refund reservation reconciliation could not be confirmed. Retry safely.');
+  }
+
+  async function repairRefundedOrderAccess(order) {
+    if (order.status !== 'refunded') return order;
+    order = await releaseRefundedOrderReservation(order);
+    await revokeOrderAccess(order._id);
+    const latest = await runQuery(OrderModel.findById(order._id)) ?? order;
+    const appliedRefundIds = latest.appliedRefundIds ?? [];
+    if (appliedRefundIds.length && typeof RefundModel.find === 'function') {
+      const refunds = await runQuery(RefundModel.find({
+        order: latest._id,
+        status: 'processed',
+        providerRefundId: { $in: appliedRefundIds },
+      })) ?? [];
+      for (const refund of refunds) await setRefundReconciliation(refund, 'verified');
+    }
+    return latest;
   }
 
   async function applyProcessedRefund(refund, order) {
@@ -214,18 +322,14 @@ export function createPaymentController({
         return current ?? order;
       }
       if ((current.appliedRefundIds ?? []).includes(refund.providerRefundId)) {
+        if (current.status === 'refunded') await repairRefundedOrderAccess(current);
         await setRefundReconciliation(refund, 'verified');
-        if (current.status === 'refunded') await revokeOrderAccess(current._id);
         return current;
       }
       const currentTotal = Number(current.totalRefundedPaise ?? 0);
       const nextTotal = currentTotal + refund.amountPaise;
       if (!Number.isSafeInteger(nextTotal) || nextTotal > current.amountPaise) {
         await setRefundReconciliation(refund, 'rejected');
-        await OrderModel.updateOne(
-          { _id: current._id, status: { $in: ['paid', 'partially_refunded', 'refunded'] } },
-          { $set: { refundReviewStatus: 'pending' } },
-        );
         return await runQuery(OrderModel.findById(current._id)) ?? current;
       }
       if (!['paid', 'partially_refunded'].includes(current.status)) {
@@ -234,8 +338,10 @@ export function createPaymentController({
       }
       const full = nextTotal === current.amountPaise;
       const reviewStatus = full ? 'not-required'
-        : current.refundReviewStatus === 'revoke-access' ? 'revoke-access' : 'pending';
-      const updated = await OrderModel.findOneAndUpdate({
+        : ['keep-access', 'revoke-access', 'product-specific'].includes(current.refundReviewStatus)
+          ? current.refundReviewStatus
+          : 'pending';
+      const filter = {
         _id: current._id,
         providerPaymentId: refund.providerPaymentId,
         status: { $in: ['paid', 'partially_refunded'] },
@@ -244,14 +350,28 @@ export function createPaymentController({
           { $eq: [{ $ifNull: ['$totalRefundedPaise', 0] }, currentTotal] },
           { $lte: [{ $add: [{ $ifNull: ['$totalRefundedPaise', 0] }, refund.amountPaise] }, '$amountPaise'] },
         ] },
-      }, {
+      };
+      const set = { status: full ? 'refunded' : 'partially_refunded', refundReviewStatus: reviewStatus };
+      if (full && current.reservationStatus === 'active') {
+        if (!current.student || !Array.isArray(current.reservationProductIds) || current.reservationProductIds.length === 0) {
+          throw apiError(503, 'Refund reservation reconciliation is unavailable. Retry safely.');
+        }
+        // Tie reservation release to this exact order, student, and product set.
+        // The refund state and reservation state commit as one majority write.
+        filter.student = current.student;
+        filter.reservationStatus = 'active';
+        filter.reservationProductIds = current.reservationProductIds;
+        set.reservationStatus = 'released';
+        set.reservationExpiresAt = null;
+      }
+      const updated = await OrderModel.findOneAndUpdate(filter, {
         $inc: { totalRefundedPaise: refund.amountPaise },
         $addToSet: { appliedRefundIds: refund.providerRefundId },
-        $set: { status: full ? 'refunded' : 'partially_refunded', refundReviewStatus: reviewStatus },
-      }, { new: true, runValidators: true });
+        $set: set,
+      }, { new: true, runValidators: true, writeConcern: { w: 'majority' } });
       if (!updated) continue;
+      if (full) await repairRefundedOrderAccess(updated);
       await setRefundReconciliation(refund, 'verified');
-      if (full) await revokeOrderAccess(current._id);
       return updated;
     }
     throw apiError(503, 'Refund reconciliation is busy. The signed event can be retried safely.');
@@ -277,6 +397,10 @@ export function createPaymentController({
     if (!currentOrder || !['paid', 'partially_refunded'].includes(currentOrder.status)
       || !(currentOrder.paymentVerifiedAt instanceof Date)
       || currentOrder.providerPaymentId !== order.providerPaymentId) return currentOrder ?? order;
+    if (currentOrder.refundReviewStatus === 'revoke-access') {
+      await revokeOrderAccess(currentOrder._id);
+      return currentOrder;
+    }
     const productIds = currentOrder.entitledProductIds?.length
       ? currentOrder.entitledProductIds.map(idOf)
       : (currentOrder.items ?? []).map((item) => idOf(item.product));
@@ -292,6 +416,10 @@ export function createPaymentController({
       || latest.providerPaymentId !== currentOrder.providerPaymentId) {
       await revokeOrderAccess(currentOrder._id);
       return latest ?? currentOrder;
+    }
+    if (latest.refundReviewStatus === 'revoke-access') {
+      await revokeOrderAccess(currentOrder._id);
+      return latest;
     }
     return latest;
   }
@@ -644,7 +772,8 @@ export function createPaymentController({
         if (!paymentEnabled) return response.status(503).json({ message: 'Payments are not configured on this server.' });
         const order = await findOwnedOrder(request.params.orderId, request.user._id);
         if (['paid', 'partially_refunded', 'refunded'].includes(order.status)) {
-          if (order.status !== 'refunded' && order.paymentProvider === 'razorpay' && order.providerPaymentId && !order.accessGrantedAt) await grantOrderAccess(order);
+          if (order.status === 'refunded') await repairRefundedOrderAccess(order);
+          else if (order.paymentProvider === 'razorpay' && order.providerPaymentId && !order.accessGrantedAt) await grantOrderAccess(order);
           const latest = await runQuery(OrderModel.findById(order._id));
           return response.status(200).json({ order: safeOrder(latest ?? order), verified: true });
         }

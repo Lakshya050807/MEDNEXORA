@@ -53,6 +53,8 @@ function invitationReplacementPipeline({ invitation, expiresAt, cleanupAt, issue
     otpDigest: '$$REMOVE',
     verificationProofDigest: '$$REMOVE',
     activationConfirmed: false,
+    deliveryJobId: '$$REMOVE',
+    deliveryJobCreatedAt: '$$REMOVE',
     lastSentAt: '$$REMOVE',
     resendWindowStartedAt: '$$REMOVE',
     updatedAt: { $literal: issuedAt },
@@ -185,7 +187,7 @@ export function createStagingRegistrationInvitationController({
             'invitations.$.status': 'revoked',
             'invitations.$.revokedAt': revokedAt,
           },
-          $unset: { invitationId: 1, otpDigest: 1, verificationProofDigest: 1, activationConfirmed: 1 },
+          $unset: { invitationId: 1, otpDigest: 1, verificationProofDigest: 1, activationConfirmed: 1, deliveryJobId: 1, deliveryJobCreatedAt: 1 },
         }, { runValidators: true, writeConcern: { w: 'majority' } });
         if (!updateMatched(revoked)) return response.status(404).json({ message: 'Invitation was not found or is no longer active.' });
         return response.status(200).json({ message: 'Unused invitation revoked.' });

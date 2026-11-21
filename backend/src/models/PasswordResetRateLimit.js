@@ -1,7 +1,10 @@
 import mongoose from 'mongoose';
 
 const passwordResetRateLimitSchema = new mongoose.Schema({
-  scope: { type: String, required: true, enum: ['request', 'complete', 'registration-request', 'registration-complete', 'staging-invitation-write'] },
+  scope: { type: String, required: true, enum: [
+    'request', 'complete', 'registration-request', 'registration-complete', 'staging-invitation-write',
+    'student-login-ip', 'student-login-account', 'admin-login-ip', 'admin-login-account',
+  ] },
   ipHash: { type: String, required: true, minlength: 64, maxlength: 64 },
   windowStart: { type: Date, required: true },
   count: { type: Number, required: true, min: 1 },

@@ -5,6 +5,7 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { localPrivatePdfPath, maxPrivatePdfBytes } from '../services/privatePdfStorage.js';
 import { publishedExamFilter } from '../services/examPublication.js';
+import { isVerifiedPurchasedAccess } from '../services/verifiedProductAccess.js';
 
 const courseTypes = new Set(['video-course', 'crash-course']);
 const freeMaterialTypes = new Set(['notes', 'practice-paper', 'previous-year-paper']);
@@ -192,6 +193,7 @@ export function createStudentController({
   TestAttemptModel,
   PurchasedAccessModel,
   OrderModel,
+  ProductAccessRevocationModel,
   QuestionBankModel,
   MockTestModel,
   SubjectModel,
@@ -204,7 +206,7 @@ export function createStudentController({
     const studentId = idOf(request.user);
     const completedAttemptFilter = { student: studentId, status: { $in: ['submitted', 'timed-out'] }, result: { $ne: null } };
     const [accessRows, recentOrders, attempts, mockAttemptRows, completedAttemptCount, progressRows, freeProducts] = await Promise.all([
-      queryRows(PurchasedAccessModel.find({ student: studentId, status: 'active' }), { select: 'product order source grantedAt' }),
+      queryRows(PurchasedAccessModel.find({ student: studentId, status: 'active' }), { select: 'student product order source status grantedAt' }),
       queryRows(OrderModel.find({ student: studentId }), { sort: { createdAt: -1, _id: -1 }, limit: 5 }),
       queryRows(TestAttemptModel.find(completedAttemptFilter), { select: '+answerKey', sort: { createdAt: -1, _id: -1 }, limit: 100 }),
       queryRows(TestAttemptModel.find({ student: studentId, mode: 'mock' }), { sort: { createdAt: -1, _id: -1 }, limit: 5 }),
@@ -216,18 +218,11 @@ export function createStudentController({
       }),
     ]);
 
-    const referencedOrderIds = [...idSet(accessRows.map((access) => access.order))];
-    const verifiedOrders = referencedOrderIds.length
-      ? await queryRows(OrderModel.find({
-        _id: { $in: referencedOrderIds },
-        student: studentId,
-        status: { $in: ['paid', 'partially_refunded'] },
-        paymentVerifiedAt: { $ne: null },
-      }), { select: '_id paymentVerifiedAt' })
-      : [];
-    const verifiedOrderIds = idSet(verifiedOrders.map((order) => order._id));
-    const paidAccessRows = accessRows.filter((access) => access.source !== 'free' && verifiedOrderIds.has(idOf(access.order)));
-    const freeAccessRows = accessRows.filter((access) => access.source === 'free');
+    const verifiedAccessRows = (await Promise.all((accessRows ?? []).map(async (access) => (
+      await isVerifiedPurchasedAccess({ access, OrderModel, ProductAccessRevocationModel, studentId, productId: access.product }) ? access : null
+    )))).filter(Boolean);
+    const paidAccessRows = verifiedAccessRows.filter((access) => access.source === 'purchase');
+    const freeAccessRows = verifiedAccessRows.filter((access) => access.source === 'free');
     const purchasedProductIds = idSet(paidAccessRows
       .map((access) => access.product));
     const freeAccessProductIds = idSet(freeAccessRows.map((access) => access.product));
@@ -435,12 +430,9 @@ export function createStudentController({
         if (!freeMaterialTypes.has(product.resourceType)) return response.status(409).json({ message: 'Free library access is available for study PDFs and practice papers only.' });
         if (!privateAssetAvailable(product.contentUrl, privateStorageOrigin, privateStorageDir)) return response.status(409).json({ message: 'The private PDF has not been configured for this resource yet.' });
 
-        const existing = await queryRows(PurchasedAccessModel.findOne({ student: studentId, product: productId }), { select: 'source status grantedAt createdAt' });
+        const existing = await queryRows(PurchasedAccessModel.findOne({ student: studentId, product: productId }), { select: 'student product order source status grantedAt createdAt' });
         if (existing?.status === 'active') {
-          if (existing.source !== 'free') {
-            const verifiedOrder = await queryRows(OrderModel.findOne({ _id: existing.order, student: studentId, status: { $in: ['paid', 'partially_refunded'] }, paymentVerifiedAt: { $ne: null } }), { select: '_id' });
-            if (!verifiedOrder) return response.status(403).json({ message: 'This resource access could not be verified.' });
-          }
+          if (!await isVerifiedPurchasedAccess({ access: existing, OrderModel, ProductAccessRevocationModel, studentId, productId })) return response.status(403).json({ message: 'This resource access could not be verified.' });
           return response.status(200).json({ access: { productId, source: existing.source ?? 'purchase', grantedAt: existing.grantedAt ?? existing.createdAt ?? null } });
         }
         if (existing) return response.status(409).json({ message: 'This resource has a revoked access record. Contact support if you think this is an error.' });
@@ -451,12 +443,9 @@ export function createStudentController({
           await PurchasedAccessModel.create({ student: studentId, product: productId, order: null, source: 'free', status: 'active', grantedAt });
         } catch (error) {
           if (error?.code !== 11000) throw error;
-          const latest = await queryRows(PurchasedAccessModel.findOne({ student: studentId, product: productId }), { select: 'source status grantedAt createdAt order' });
+          const latest = await queryRows(PurchasedAccessModel.findOne({ student: studentId, product: productId }), { select: 'student product source status grantedAt createdAt order' });
           if (latest?.status !== 'active') throw error;
-          if (latest.source !== 'free') {
-            const verifiedOrder = await queryRows(OrderModel.findOne({ _id: latest.order, student: studentId, status: { $in: ['paid', 'partially_refunded'] }, paymentVerifiedAt: { $ne: null } }), { select: '_id' });
-            if (!verifiedOrder) return response.status(403).json({ message: 'This resource access could not be verified.' });
-          }
+          if (!await isVerifiedPurchasedAccess({ access: latest, OrderModel, ProductAccessRevocationModel, studentId, productId })) return response.status(403).json({ message: 'This resource access could not be verified.' });
           return response.status(200).json({ access: { productId, source: latest.source ?? 'purchase', grantedAt: latest.grantedAt ?? latest.createdAt ?? null } });
         }
         return response.status(201).json({ access: { productId, source: 'free', grantedAt } });
@@ -478,17 +467,8 @@ export function createStudentController({
         });
         if (!isPublishedCatalogueProduct(product)) return response.status(404).json({ message: 'The resource could not be found.' });
 
-        const access = await queryRows(PurchasedAccessModel.findOne({ student: studentId, product: productId, status: 'active' }), { select: 'order source' });
-        if (!access) return response.status(403).json({ message: 'A verified purchase is required to download this resource.' });
-        if (access.source !== 'free') {
-          const verifiedOrder = await queryRows(OrderModel.findOne({
-            _id: access.order,
-            student: studentId,
-            status: { $in: ['paid', 'partially_refunded'] },
-            paymentVerifiedAt: { $ne: null },
-          }), { select: '_id' });
-          if (!verifiedOrder) return response.status(403).json({ message: 'A verified purchase is required to download this resource.' });
-        }
+        const access = await queryRows(PurchasedAccessModel.findOne({ student: studentId, product: productId, status: 'active' }), { select: 'student product order source status' });
+        if (!await isVerifiedPurchasedAccess({ access, OrderModel, ProductAccessRevocationModel, studentId, productId })) return response.status(403).json({ message: 'A verified purchase is required to download this resource.' });
 
         const localPath = localPrivatePdfPath(product.contentUrl, privateStorageDir);
         if (localPath) {

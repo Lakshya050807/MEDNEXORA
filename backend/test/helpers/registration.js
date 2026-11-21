@@ -41,6 +41,7 @@ export class FakeRegistrationRateLimitModel {
 
 export function registrationTestAppOptions() {
   return {
+    launchConfig: { registrationEnabled: true, paidPurchasesEnabled: false },
     PasswordResetRateLimitModel: FakeRegistrationRateLimitModel,
     RegistrationVerificationChallengeModel: FakeRegistrationVerificationChallengeModel,
     registrationEmailVerificationEnabled: true,

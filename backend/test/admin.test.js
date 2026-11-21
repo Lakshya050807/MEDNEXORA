@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { FakeRegistrationRateLimitModel, resetRegistrationTestModels } from './helpers/registration.js';
+import { FakeProductAccessRevocationModel, clearFakeProductAccessRevocations } from './helpers/product-access-revocations.js';
 
 process.env.NODE_ENV = 'test';
 process.env.SESSION_SECRET = 'test-session-secret-with-at-least-32-bytes';
@@ -13,6 +15,7 @@ const [{ createApp }, session, bcrypt] = await Promise.all([
   import('express-session'),
   import('bcryptjs'),
 ]);
+const { isVerifiedPurchasedAccess } = await import('../src/services/verifiedProductAccess.js');
 
 const adminId = '507f1f77bcf86cd799439001';
 const examId = '507f1f77bcf86cd799439002';
@@ -227,13 +230,19 @@ class FakeOrderModel {
   static find(filter = {}) {
     return new FakeQuery(orderRecords.filter((order) => matchesFilter(order, filter)));
   }
-  static findOne(filter = {}) { return new FakeQuery(orderRecords.find((order) => matchesFilter(order, filter)) ?? null); }
+  static async findOne(filter = {}) { return orderRecords.find((order) => matchesFilter(order, filter)) ?? null; }
   static findById(id) { return new FakeQuery(orderRecords.find((order) => String(order._id) === String(id)) ?? null); }
   static async findOneAndUpdate(filter = {}, update = {}) {
     const order = orderRecords.find((item) => matchesFilter(item, filter));
     if (!order) return null;
     Object.assign(order, update.$set ?? {});
     return order;
+  }
+  static async updateOne(filter = {}, update = {}) {
+    const order = orderRecords.find((item) => matchesFilter(item, filter));
+    if (!order) return { matchedCount: 0, modifiedCount: 0 };
+    Object.assign(order, update.$set ?? {});
+    return { matchedCount: 1, modifiedCount: 1 };
   }
 }
 
@@ -244,6 +253,8 @@ function nextId() {
 nextId.counter = 100;
 
 beforeEach(async () => {
+  resetRegistrationTestModels();
+  clearFakeProductAccessRevocations();
   nextId.counter = 100;
   lastSort = null;
   studyMaterialCreateError = null;
@@ -263,6 +274,7 @@ beforeEach(async () => {
     { _id: '507f1f77bcf86cd799439022', student: { _id: users[1]._id, name: users[1].name, email: users[1].email }, items: [], amountPaise: 8000, status: 'pending', paymentProvider: 'none', paymentVerifiedAt: null, createdAt: new Date('2026-10-03T00:00:00Z') },
   ];
   const app = createApp({
+    PasswordResetRateLimitModel: FakeRegistrationRateLimitModel,
     sessionStore: new session.MemoryStore(),
     UserModel: FakeUserModel,
     OrderModel: FakeOrderModel,
@@ -278,6 +290,7 @@ beforeEach(async () => {
     privateStorageDir,
     privateStorageOrigin: '',
     PurchasedAccessModel: FakePurchasedAccessModel,
+    ProductAccessRevocationModel: FakeProductAccessRevocationModel,
     RefundModel: FakeRefundModel,
     CourseProgressModel: FakeCourseProgressModel,
   });
@@ -913,7 +926,8 @@ test('admin-to-student content workflow publishes configured mappings, protects 
   assert.equal(deniedDownload.response.status, 403);
   const studentId = users.find((user) => user.email === 'student@example.com')._id;
   const verifiedOrder = orderRecords.find((order) => order.status === 'paid' && order.paymentVerifiedAt instanceof Date);
-  collections.PurchasedAccess.push(new FakeRecord({ _id: nextId(), student: studentId, product: productId, order: verifiedOrder._id, status: 'active' }, 'PurchasedAccess'));
+  verifiedOrder.entitledProductIds = [productId];
+  collections.PurchasedAccess.push(new FakeRecord({ _id: nextId(), student: studentId, product: productId, order: verifiedOrder._id, source: 'purchase', status: 'active' }, 'PurchasedAccess'));
   const purchasedDownload = await request(`/api/student/resources/${productId}/download`, { cookie: studentCookie });
   assert.equal(purchasedDownload.response.status, 200);
   assert.equal(purchasedDownload.payload, '%PDF-1.7 isolated workflow sample');
@@ -1242,13 +1256,15 @@ test('admin order listing includes payment status and student purchase details w
   assert.equal(result.payload.items.some((order) => 'providerOrderId' in order), false);
 });
 
-test('admin refund report exposes verified refund and entitlement state and permits one protected review decision', async () => {
+test('admin refund review persists a product revocation before entitlement cleanup and preserves single-product compatibility', async () => {
   const partialOrderId = '507f1f77bcf86cd799439099';
+  const productId = '507f1f77bcf86cd799439031';
   const studentId = users.find((user) => user.email === 'student@example.com')._id;
   orderRecords.push({
     _id: partialOrderId,
     student: { _id: studentId, name: 'Student Reader', email: 'student@example.com' },
-    items: [{ titleSnapshot: 'Biology notes', unitPricePaise: 12000, quantity: 1 }],
+    items: [{ product: productId, titleSnapshot: 'Biology notes', unitPricePaise: 12000, quantity: 1 }],
+    entitledProductIds: [productId],
     amountPaise: 12000,
     totalRefundedPaise: 3000,
     status: 'partially_refunded',
@@ -1264,7 +1280,7 @@ test('admin refund report exposes verified refund and entitlement state and perm
   }, 'PaymentRefund'));
   const access = new FakeRecord({
     _id: nextId(), order: partialOrderId, student: studentId,
-    source: 'purchase', status: 'active',
+    product: productId, source: 'purchase', status: 'active',
   }, 'PurchasedAccess');
   collections.PurchasedAccess.push(access);
 
@@ -1292,7 +1308,11 @@ test('admin refund report exposes verified refund and entitlement state and perm
   });
   assert.equal(decision.response.status, 200);
   assert.equal(decision.payload.decision, 'revoke-access');
+  assert.deepEqual(decision.payload.productIds, [productId]);
+  assert.equal(decision.payload.reviewStatus, 'product-specific');
   assert.equal(access.status, 'revoked');
+  assert.equal(FakeProductAccessRevocationModel.rows.length, 1);
+  assert.equal(FakeProductAccessRevocationModel.rows[0].product, productId);
   const retry = await request(`/api/admin/orders/${partialOrderId}/refund-review`, {
     method: 'POST', cookie: adminCookie, body: { decision: 'revoke-access' },
   });
@@ -1318,4 +1338,124 @@ test('admin refund report exposes verified refund and entitlement state and perm
   assert.equal(keepDecision.response.status, 200);
   assert.equal(keepDecision.payload.decision, 'keep-access');
   assert.equal(keepAccess.status, 'active');
+  assert.equal(FakeProductAccessRevocationModel.rows.length, 1, 'a monetary refund with a keep-access decision does not create a product revocation');
+});
+
+test('multi-product refund review requires explicit selection and revokes only selected products', async () => {
+  const adminCookie = await loginAdmin();
+  const studentId = users.find((user) => user.email === 'student@example.com')._id;
+  const orderId = '507f1f77bcf86cd799439097';
+  const courseA = '507f1f77bcf86cd799439041';
+  const courseB = '507f1f77bcf86cd799439042';
+  orderRecords.push({
+    _id: orderId,
+    student: { _id: studentId, name: 'Student Reader', email: 'student@example.com' },
+    items: [
+      { product: courseA, titleSnapshot: 'Course A', quantity: 1, unitPricePaise: 5000 },
+      { product: courseB, titleSnapshot: 'Course B', quantity: 1, unitPricePaise: 7000 },
+    ],
+    entitledProductIds: [courseA, courseB],
+    amountPaise: 12000,
+    totalRefundedPaise: 5000,
+    status: 'partially_refunded',
+    paymentProvider: 'razorpay',
+    paymentVerifiedAt: new Date(),
+    refundReviewStatus: 'pending',
+  });
+  const accessA = new FakeRecord({ _id: nextId(), order: orderId, student: studentId, product: courseA, source: 'purchase', status: 'active' }, 'PurchasedAccess');
+  const accessB = new FakeRecord({ _id: nextId(), order: orderId, student: studentId, product: courseB, source: 'purchase', status: 'active' }, 'PurchasedAccess');
+  collections.PurchasedAccess.push(accessA, accessB);
+
+  const omittedSelection = await request(`/api/admin/orders/${orderId}/refund-review`, {
+    method: 'POST', cookie: adminCookie, body: { decision: 'revoke-access' },
+  });
+  assert.equal(omittedSelection.response.status, 400);
+  assert.equal(accessA.status, 'active');
+  assert.equal(accessB.status, 'active');
+
+  const invalidSelection = await request(`/api/admin/orders/${orderId}/refund-review`, {
+    method: 'POST', cookie: adminCookie, body: { decision: 'revoke-access', productIds: ['507f1f77bcf86cd799439099'] },
+  });
+  assert.equal(invalidSelection.response.status, 400);
+
+  const selected = await request(`/api/admin/orders/${orderId}/refund-review`, {
+    method: 'POST', cookie: adminCookie, body: { decision: 'revoke-access', productIds: [courseA] },
+  });
+  assert.equal(selected.response.status, 200);
+  assert.equal(accessA.status, 'revoked');
+  assert.equal(accessB.status, 'active');
+  assert.equal(FakeProductAccessRevocationModel.rows.length, 1);
+
+  const order = orderRecords.find((row) => row._id === orderId);
+  assert.equal(await isVerifiedPurchasedAccess({
+    access: accessA,
+    OrderModel: FakeOrderModel,
+    ProductAccessRevocationModel: FakeProductAccessRevocationModel,
+    studentId,
+    productId: courseA,
+  }), false);
+  assert.equal(await isVerifiedPurchasedAccess({
+    access: accessB,
+    OrderModel: FakeOrderModel,
+    ProductAccessRevocationModel: FakeProductAccessRevocationModel,
+    studentId,
+    productId: courseB,
+  }), true);
+  assert.equal(order.refundReviewStatus, 'product-specific');
+});
+
+test('failed entitlement cleanup still denies the revoked product and admin retry repairs it', async () => {
+  const adminCookie = await loginAdmin();
+  const studentId = users.find((user) => user.email === 'student@example.com')._id;
+  const orderId = '507f1f77bcf86cd799439096';
+  const productId = '507f1f77bcf86cd799439051';
+  orderRecords.push({
+    _id: orderId,
+    student: { _id: studentId, name: 'Student Reader', email: 'student@example.com' },
+    items: [{ product: productId, titleSnapshot: 'Retry course', quantity: 1, unitPricePaise: 5000 }],
+    entitledProductIds: [productId], amountPaise: 5000, totalRefundedPaise: 1000,
+    status: 'partially_refunded', paymentProvider: 'razorpay', paymentVerifiedAt: new Date(), refundReviewStatus: 'pending',
+  });
+  const access = new FakeRecord({ _id: nextId(), order: orderId, student: studentId, product: productId, source: 'purchase', status: 'active' }, 'PurchasedAccess');
+  collections.PurchasedAccess.push(access);
+  const originalUpdateMany = FakePurchasedAccessModel.updateMany;
+  let failOnce = true;
+  FakePurchasedAccessModel.updateMany = async (...args) => {
+    if (failOnce) {
+      failOnce = false;
+      throw new Error('simulated entitlement database failure');
+    }
+    return originalUpdateMany.apply(FakePurchasedAccessModel, args);
+  };
+  try {
+    const first = await request(`/api/admin/orders/${orderId}/refund-review`, {
+      method: 'POST', cookie: adminCookie, body: { decision: 'revoke-access' },
+    });
+    assert.equal(first.response.status, 503);
+    assert.equal(access.status, 'active', 'the denormalized row can remain stale after failed cleanup');
+    assert.equal(FakeProductAccessRevocationModel.rows.length, 1, 'the authoritative decision persisted first');
+    assert.equal(await isVerifiedPurchasedAccess({
+      access,
+      OrderModel: FakeOrderModel,
+      ProductAccessRevocationModel: FakeProductAccessRevocationModel,
+      studentId,
+      productId,
+    }), false, 'the shared authorization service denies access before cleanup succeeds');
+
+    const retry = await request(`/api/admin/orders/${orderId}/refund-review`, {
+      method: 'POST', cookie: adminCookie, body: { decision: 'revoke-access' },
+    });
+    assert.equal(retry.response.status, 200);
+    assert.equal(access.status, 'revoked');
+    assert.equal(FakeProductAccessRevocationModel.rows.length, 1, 'retry is idempotent');
+    assert.equal(await isVerifiedPurchasedAccess({
+      access,
+      OrderModel: FakeOrderModel,
+      ProductAccessRevocationModel: FakeProductAccessRevocationModel,
+      studentId,
+      productId,
+    }), false);
+  } finally {
+    FakePurchasedAccessModel.updateMany = originalUpdateMany;
+  }
 });

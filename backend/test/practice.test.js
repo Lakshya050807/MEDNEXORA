@@ -1,5 +1,6 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { FakeProductAccessRevocationModel, clearFakeProductAccessRevocations } from './helpers/product-access-revocations.js';
 
 process.env.NODE_ENV = 'test';
 process.env.SESSION_SECRET = 'practice-test-session-secret-with-at-least-32-bytes';
@@ -57,6 +58,8 @@ let usersByEmail;
 let usersById;
 let attempts;
 let accesses;
+let paidOrders;
+let paidOrderCounter;
 let nextUserId;
 let server;
 let baseUrl;
@@ -76,7 +79,7 @@ class FakeUserModel {
 }
 
 class FakeQuestionBankModel {
-  static findOne(filter) { return new FakeQuery(String(filter._id) === bankId && filter.publicationStatus === 'published' ? bank : null); }
+  static findOne(filter) { return new FakeQuery(String(filter._id) === bankId && (!filter.publicationStatus || filter.publicationStatus === 'published') ? bank : null); }
   static find(filter = {}) {
     const rows = [bank].filter((item) => (!filter.publicationStatus || item.publicationStatus === filter.publicationStatus)
       && (!filter.exam || String(item.exam) === String(filter.exam))
@@ -89,6 +92,7 @@ class FakeQuestionBankModel {
 
 class FakeMockTestModel {
   static findOne(filter) { return new FakeQuery(mockTests.find((item) => String(item._id) === String(filter._id) && item.publicationStatus === filter.publicationStatus) ?? null); }
+  static findById(id) { return new FakeQuery(mockTests.find((item) => String(item._id) === String(id)) ?? null); }
   static find(filter = {}) { return new FakeQuery(mockTests.filter((item) => !filter.publicationStatus || item.publicationStatus === filter.publicationStatus)); }
 }
 
@@ -120,7 +124,29 @@ class FakeChapterModel {
 }
 
 class FakePurchasedAccessModel {
-  static async exists(filter) { return accesses.some((entry) => String(entry.student) === String(filter.student) && String(entry.product) === String(filter.product) && entry.status === 'active') ? { _id: 'active-access' } : null; }
+  static findOne(filter) { return new FakeQuery(accesses.find((entry) => String(entry.student) === String(filter.student) && String(entry.product) === String(filter.product) && entry.status === filter.status) ?? null); }
+}
+
+class FakeOrderModel {
+  static findOne(filter = {}) {
+    return new FakeQuery(paidOrders.find((order) => String(order._id) === String(filter._id)
+      && String(order.student) === String(filter.student)) ?? null);
+  }
+}
+
+function grantPurchaseAccess(student, product) {
+  const orderId = `practice-order-${paidOrderCounter++}`;
+  const order = {
+    _id: orderId,
+    student,
+    status: 'paid',
+    paymentVerifiedAt: new Date(),
+    entitledProductIds: [product],
+    items: [{ product }],
+  };
+  paidOrders.push(order);
+  accesses.push({ student, product, order: orderId, source: 'purchase', status: 'active' });
+  return { order, access: accesses.at(-1) };
 }
 
 function matches(attempt, filter) {
@@ -159,10 +185,13 @@ class FakeTestAttemptModel {
 
 beforeEach(async () => {
   resetRegistrationTestModels();
+  clearFakeProductAccessRevocations();
   usersByEmail = new Map();
   usersById = new Map();
   attempts = new Map();
   accesses = [];
+  paidOrders = [];
+  paidOrderCounter = 1;
   bank.questions = structuredClone(demoQuestions);
   nextUserId = 1;
   const app = createApp({
@@ -173,6 +202,8 @@ beforeEach(async () => {
     MockTestModel: FakeMockTestModel,
     ProductModel: FakeProductModel,
     PurchasedAccessModel: FakePurchasedAccessModel,
+    ProductAccessRevocationModel: FakeProductAccessRevocationModel,
+    OrderModel: FakeOrderModel,
     TestAttemptModel: FakeTestAttemptModel,
     TopicModel: FakeTopicModel,
     SubjectModel: FakeSubjectModel,
@@ -364,12 +395,39 @@ test('paid mock tests reject students without active purchased access', async ()
   assert.equal(lockedList.payload.items.find((item) => item.id === paidProductId).locked, true);
   const denied = await request('/api/student/practice/attempts', { method: 'POST', cookie, body: { mode: 'mock', mockTestId: paidProductId } });
   assert.equal(denied.response.status, 403);
-  accesses.push({ student: usersByEmail.get('paid-test@example.com')._id, product: paidProductId, status: 'active' });
+  grantPurchaseAccess(usersByEmail.get('paid-test@example.com')._id, paidProductId);
   const allowed = await request('/api/student/practice/attempts', { method: 'POST', cookie, body: { mode: 'mock', mockTestId: paidProductId } });
   assert.equal(allowed.response.status, 201);
   const submitted = await request(`/api/student/practice/attempts/${allowed.payload.attempt.id}/submit`, { method: 'POST', cookie, body: {} });
   assert.equal(submitted.response.status, 200);
   assert.equal(submitted.payload.attempt.questions[0].review, undefined);
+});
+
+test('full refund blocks paid mock-test start, resume, answer, review, and submit while entitlement is stale-active', async () => {
+  const cookie = await register('Refunded Practice Student', 'refunded-practice@example.com');
+  const studentId = usersByEmail.get('refunded-practice@example.com')._id;
+  const { order } = grantPurchaseAccess(studentId, paidProductId);
+  const started = await request('/api/student/practice/attempts', {
+    method: 'POST', cookie, body: { mode: 'mock', mockTestId: paidProductId },
+  });
+  assert.equal(started.response.status, 201);
+
+  order.status = 'refunded';
+  const attemptId = started.payload.attempt.id;
+  const review = await request(`/api/student/practice/attempts/${attemptId}`, { cookie });
+  const answer = await request(`/api/student/practice/attempts/${attemptId}/questions/${questionIds[0]}`, {
+    method: 'PATCH', cookie, body: { selectedOptionIndex: 0 },
+  });
+  const submit = await request(`/api/student/practice/attempts/${attemptId}/submit`, { method: 'POST', cookie, body: {} });
+  const resume = await request('/api/student/practice/attempts', {
+    method: 'POST', cookie, body: { mode: 'mock', mockTestId: paidProductId },
+  });
+  for (const result of [review, answer, submit, resume]) assert.equal(result.response.status, 403);
+
+  const freePractice = await request('/api/student/practice/attempts', {
+    method: 'POST', cookie, body: { mode: 'practice', questionBankId: bankId },
+  });
+  assert.equal(freePractice.response.status, 201, 'a genuinely free question bank remains accessible');
 });
 
 test('students cannot read or modify another student’s attempt; invalid answers are rejected', async () => {

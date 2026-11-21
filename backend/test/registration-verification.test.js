@@ -13,6 +13,7 @@ const [{ createApp }, session, { default: RegistrationVerificationChallenge }, {
   import('./helpers/registration.js'),
 ]);
 const { FakeRegistrationRateLimitModel, resetRegistrationTestModels, testRegistrationPepper } = registrationTests;
+const { createFakeEmailOutboxModel } = await import('./helpers/fakeEmailOutbox.js');
 
 const OTP_RE = /\b(\d{6})\b/u;
 let docs;
@@ -21,11 +22,13 @@ let clock;
 let sent;
 let otp;
 let failEmail;
-let failCleanup;
 let failActivation;
 let activationCommitThenLoseAck;
 let failActivationRollback;
+let confirmationCommitThenLoseAck;
+let confirmationFailBeforeCommit;
 let server;
+let backgroundTasks;
 
 function matches(doc, filter) {
   return Object.entries(filter).every(([key, expected]) => {
@@ -38,6 +41,7 @@ function matches(doc, filter) {
         if (operator === '$gt') return actual > value;
         if (operator === '$lt') return actual < value;
         if (operator === '$lte') return actual <= value;
+        if (operator === '$ne') return actual !== value;
         return true;
       });
     }
@@ -65,13 +69,17 @@ class ChallengeModel {
 
   static async updateOne(filter, update) {
     const isActivation = filter.status === 'pending' && update.$set?.status === 'active';
+    const isConfirmation = filter.status === 'active' && update.$set?.activationConfirmed === true;
+    if (confirmationFailBeforeCommit && isConfirmation) {
+      confirmationFailBeforeCommit = false;
+      throw new Error('simulated confirmation write failure before commit');
+    }
     if (failActivation && isActivation) {
       failActivation = false;
       throw new Error('simulated activation failure');
     }
     if (failActivationRollback && filter.status === 'active' && filter.activationConfirmed === false
       && update.$set?.status === 'pending') throw new Error('simulated activation rollback failure');
-    if (failCleanup && update.$unset?.otpDigest) throw new Error('simulated cleanup failure');
     const doc = docs.get(filter.email);
     if (!doc || !matches(doc, filter)) return { matchedCount: 0 };
     Object.assign(doc, update.$set);
@@ -80,6 +88,10 @@ class ChallengeModel {
     if (activationCommitThenLoseAck && isActivation) {
       activationCommitThenLoseAck = false;
       throw new Error('simulated lost activation acknowledgement after commit');
+    }
+    if (confirmationCommitThenLoseAck && isConfirmation) {
+      confirmationCommitThenLoseAck = false;
+      throw new Error('simulated lost activation marker acknowledgement after commit');
     }
     return { matchedCount: 1 };
   }
@@ -100,7 +112,8 @@ class UserModel {
   }
 }
 
-async function start({ gate = true, enabled = true, provider } = {}) {
+async function start({ gate = true, enabled = true, provider, outboxModel } = {}) {
+  backgroundTasks = [];
   const sender = provider ?? {
     async send(message) {
       sent += 1;
@@ -113,11 +126,13 @@ async function start({ gate = true, enabled = true, provider } = {}) {
     sessionStore: new session.MemoryStore(),
     UserModel,
     RegistrationVerificationChallengeModel: ChallengeModel,
+    EmailOutboxModel: outboxModel ?? createFakeEmailOutboxModel(),
     PasswordResetRateLimitModel: FakeRegistrationRateLimitModel,
     registrationEmailVerificationEnabled: enabled,
     registrationOtpPepper: testRegistrationPepper,
     registrationNow: () => new Date(clock),
     registrationEmailProvider: sender,
+    backgroundTaskScheduler(task) { backgroundTasks.push(task); },
     launchConfig: { registrationEnabled: gate, paidPurchasesEnabled: false },
   });
   server = await new Promise((resolve, reject) => {
@@ -127,13 +142,19 @@ async function start({ gate = true, enabled = true, provider } = {}) {
   return 'http://127.0.0.1:' + server.address().port;
 }
 
-async function post(base, path, body, origin = true) {
+async function drainBackgroundTasks() {
+  while (backgroundTasks.length) await backgroundTasks.shift()();
+}
+
+async function post(base, path, body, origin = true, { drain = true } = {}) {
   const response = await fetch(base + path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(typeof origin === 'string' ? { Origin: origin } : origin ? { Origin: 'http://localhost:5173' } : {}) },
     body: JSON.stringify(body),
   });
-  return { response, body: await response.json() };
+  const result = { response, body: await response.json() };
+  if (drain && path === '/api/auth/registration/request-otp') await drainBackgroundTasks();
+  return result;
 }
 
 const requestOtp = (base, email = 'student@example.test') => post(base, '/api/auth/registration/request-otp', { email });
@@ -147,10 +168,12 @@ beforeEach(() => {
   sent = 0;
   otp = null;
   failEmail = false;
-  failCleanup = false;
   failActivation = false;
   activationCommitThenLoseAck = false;
   failActivationRollback = false;
+  confirmationCommitThenLoseAck = false;
+  confirmationFailBeforeCommit = false;
+  backgroundTasks = [];
 });
 
 afterEach(async () => {
@@ -180,7 +203,7 @@ test('email OTP proof is required before account creation and successful registr
   assert.equal(requested.response.status, 202);
   assert.equal(requested.response.headers.get('cache-control'), 'no-store');
   assert.equal(users.size, 0);
-  assert.equal(requested.body.message, 'If this email address can be used for registration, a verification code will be sent.');
+  assert.equal(requested.body.message, 'If this address and request are eligible, a verification code may be sent. This response does not confirm account status or email delivery.');
   assert.equal(JSON.stringify(requested.body).includes(otp), false);
   const doc = docs.get('student@example.test');
   assert.equal(doc.status, 'active');
@@ -203,6 +226,32 @@ test('email OTP proof is required before account creation and successful registr
   assert.equal(users.get('student@example.test').emailVerified, true);
   assert.equal(users.get('student@example.test').role, 'student');
   assert.equal(docs.get('student@example.test').status, 'consumed');
+});
+
+test('generic registration response completes while eligible-account and invitation checks remain in background', async () => {
+  let releaseDelivery;
+  let signalDeliveryStarted;
+  const deliveryStarted = new Promise((resolve) => { signalDeliveryStarted = resolve; });
+  const deliveryGate = new Promise((resolve) => { releaseDelivery = resolve; });
+  const base = await start({ provider: { async send(message) {
+    sent += 1;
+    otp = message.text.match(OTP_RE)?.[1] ?? null;
+    signalDeliveryStarted();
+    await deliveryGate;
+    return { sent: true };
+  } } });
+
+  const eligible = await post(base, '/api/auth/registration/request-otp', { email: 'available@example.test' }, true, { drain: false });
+  assert.equal(eligible.response.status, 202);
+  const backgroundWork = drainBackgroundTasks();
+  await deliveryStarted;
+  const missing = await post(base, '/api/auth/registration/request-otp', { email: 'other@example.test' }, true, { drain: false });
+  assert.deepEqual(missing.body, eligible.body);
+  assert.equal(missing.response.status, 202);
+  assert.equal(docs.get('available@example.test').status, 'pending');
+  releaseDelivery();
+  await backgroundWork;
+  assert.equal(docs.get('available@example.test').activationConfirmed, true);
 });
 
 test('invalid, expired, replayed, and five-times incorrect OTPs are rejected', async () => {
@@ -253,28 +302,30 @@ test('existing addresses and unknown addresses receive the same generic response
   assert.equal(sent, 1);
 });
 
-test('provider and cleanup failures never make an OTP usable; activation failure remains pending', async () => {
+test('provider failure remains retryable and pending; activation failure remains unusable', async () => {
   const base = await start();
   failEmail = true;
   await requestOtp(base, 'cleanup@example.test');
   assert.equal(docs.get('cleanup@example.test').status, 'pending');
-  assert.equal('otpDigest' in docs.get('cleanup@example.test'), false);
+  assert.ok(docs.get('cleanup@example.test').otpDigest, 'the outbox retains only a digest in the challenge while retrying delivery');
+  assert.equal(docs.get('cleanup@example.test').activationConfirmed, false);
   assert.equal((await verifyOtp(base, 'cleanup@example.test')).response.status, 400);
 
-  docs.clear();
-  failCleanup = true;
-  await requestOtp(base, 'cleanup-failed@example.test');
-  assert.equal(docs.get('cleanup-failed@example.test').status, 'pending');
-  assert.ok(docs.get('cleanup-failed@example.test').otpDigest);
-  assert.equal((await verifyOtp(base, 'cleanup-failed@example.test')).response.status, 400);
-
-  docs.clear();
   failEmail = false;
-  failCleanup = false;
   failActivation = true;
   await requestOtp(base, 'activation@example.test');
   assert.equal(docs.get('activation@example.test').status, 'pending');
   assert.equal((await verifyOtp(base, 'activation@example.test')).response.status, 400);
+});
+
+test('registration request does not report 202 when the durable outbox insert fails', async () => {
+  class UnavailableOutboxModel { static async create() { throw new Error('database unavailable'); } }
+  const base = await start({ outboxModel: UnavailableOutboxModel });
+  const result = await requestOtp(base, 'durability@example.test');
+  assert.equal(result.response.status, 503);
+  assert.equal(result.response.headers.get('cache-control'), 'no-store');
+  assert.equal(sent, 0);
+  assert.equal(docs.has('durability@example.test'), false);
 });
 
 test('committed activation with lost acknowledgement and failed rollback cannot verify on later requests', async () => {
@@ -296,6 +347,36 @@ test('committed activation with lost acknowledgement and failed rollback cannot 
     assert.equal(challenge.verificationProofDigest, undefined);
     assert.equal(users.size, 0);
   }
+});
+
+test('committed registration activation marker with lost acknowledgement is accepted only when active and confirmed state is persisted', async () => {
+  const base = await start();
+  confirmationCommitThenLoseAck = true;
+  failActivationRollback = true;
+
+  const requested = await requestOtp(base, 'marker-commit@example.test');
+  assert.equal(requested.response.status, 202);
+  const challenge = docs.get('marker-commit@example.test');
+  assert.equal(challenge.status, 'active');
+  assert.equal(challenge.activationConfirmed, true, 'the simulated marker was committed before the acknowledgement was lost');
+  const verified = await verifyOtp(base, 'marker-commit@example.test', otp);
+  assert.equal(verified.response.status, 200, 'the verification write accepts only the persisted active and confirmed state');
+  assert.equal(challenge.status, 'verified');
+});
+
+test('uncommitted registration activation marker and failed rollback cannot issue verification proof', async () => {
+  const base = await start();
+  confirmationFailBeforeCommit = true;
+  failActivationRollback = true;
+
+  const requested = await requestOtp(base, 'marker-uncommitted@example.test');
+  assert.equal(requested.response.status, 202);
+  const challenge = docs.get('marker-uncommitted@example.test');
+  assert.equal(challenge.status, 'active');
+  assert.equal(challenge.activationConfirmed, false);
+  const verified = await verifyOtp(base, 'marker-uncommitted@example.test', otp);
+  assert.equal(verified.response.status, 400);
+  assert.equal(challenge.verificationProofDigest, undefined);
 });
 
 test('committed activation with lost acknowledgement and failed rollback cannot verify on later requests', async () => {

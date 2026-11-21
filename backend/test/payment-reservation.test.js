@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 process.env.NODE_ENV = 'test';
-process.env.SESSION_SECRET = 'payment-reservation-test-secret-with-32-bytes';
+process.env.SESSION_SECRET = randomBytes(32).toString('base64url');
 process.env.APP_ORIGIN = 'http://localhost:5173';
-import Order from '../src/models/Order.js';
-import { findReservationConflicts, reservationStatusFor } from '../scripts/backfill-purchase-reservations.js';
+
+const [{ default: Order }, { findReservationConflicts, reservationStatusFor }] = await Promise.all([
+  import('../src/models/Order.js'),
+  import('../scripts/backfill-purchase-reservations.js'),
+]);
 
 test('Order schema has a unique per-student multikey index for active reservations', () => {
   const reservationIndex = Order.schema.indexes().find(([keys, options]) => (

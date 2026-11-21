@@ -51,6 +51,9 @@ export async function reserveRegistrationChallenge({
   allowCreate = true,
   invitationId,
   cleanupAt,
+  expiresAt,
+  deliveryJobId,
+  deliveryJobCreatedAt,
 }) {
   const cooldownBefore = new Date(now.getTime() - registrationResendCooldownMs);
   const windowBefore = new Date(now.getTime() - registrationResendWindowMs);
@@ -72,16 +75,29 @@ export async function reserveRegistrationChallenge({
     otpDigest: digest,
     status: 'pending',
     activationConfirmed: false,
-    expiresAt: new Date(now.getTime() + registrationOtpLifetimeMs),
+    expiresAt: expiresAt ?? new Date(now.getTime() + registrationOtpLifetimeMs),
     attempts: 0,
     lastSentAt: now,
     cleanupAt: cleanupAt ?? new Date(now.getTime() + registrationResendWindowMs),
+    ...(deliveryJobId ? { deliveryJobId } : {}),
+    ...(deliveryJobCreatedAt ? { deliveryJobCreatedAt } : {}),
     ...(invitationId ? { invitationId } : {}),
   };
+  const notSuperseded = deliveryJobCreatedAt ? { $or: [
+    { deliveryJobCreatedAt: { $exists: false } },
+    { deliveryJobCreatedAt: null },
+    { deliveryJobCreatedAt: { $lte: deliveryJobCreatedAt } },
+  ] } : {};
+  // An existing job may be retried while its challenge is still pending, but
+  // it may never recreate a challenge after that job's OTP has been verified,
+  // consumed, locked, or otherwise removed. A new resend has a distinct job ID.
+  const notSameJob = deliveryJobId ? { deliveryJobId: { $ne: deliveryJobId } } : {};
 
   const startWindow = async () => ChallengeModel.updateOne({
     email,
     ...matchFilter,
+    ...notSuperseded,
+    ...notSameJob,
     $and: [canSend, windowExpired],
   }, {
     $set: {
@@ -95,6 +111,8 @@ export async function reserveRegistrationChallenge({
   const useCurrentWindow = async () => ChallengeModel.updateOne({
     email,
     ...matchFilter,
+    ...notSuperseded,
+    ...notSameJob,
     $and: [canSend, {
       resendWindowStartedAt: { $gt: windowBefore },
       $or: [

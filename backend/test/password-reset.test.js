@@ -13,11 +13,14 @@ const [{ default: bcrypt }, { default: session }, { createApp }, { default: User
   import('../src/app.js'),
   import('../src/models/User.js'),
 ]);
+const { createFakeEmailOutboxModel } = await import('./helpers/fakeEmailOutbox.js');
 
 const pepper = 'password-reset-test-pepper-that-is-long-enough-32-bytes';
 const rateLimitSecret = 'password-reset-rate-limit-test-key-32-bytes-long';
 const initialTime = Date.parse('2026-11-19T10:00:00.000Z');
 const servers = new Set();
+const taskQueues = new WeakMap();
+const serverTaskQueues = new WeakMap();
 let usersByEmail;
 let usersById;
 let nextId;
@@ -44,6 +47,7 @@ function matchesValue(document, key, condition) {
       if (operator === '$lt') return exists && compare(value, expected) < 0;
       if (operator === '$lte') return exists && compare(value, expected) <= 0;
       if (operator === '$gt') return exists && compare(value, expected) > 0;
+      if (operator === '$ne') return !exists || value !== expected;
       return false;
     });
   }
@@ -59,9 +63,10 @@ function matchesFilter(document, filter) {
 }
 
 class FakeUserModel {
-  static failCleanup = false;
   static failActivation = false;
   static activationCommitThenLoseAck = false;
+  static confirmationCommitThenLoseAck = false;
+  static confirmationFailBeforeCommit = false;
   static failActivationRollback = false;
 
   static async create(data) {
@@ -80,13 +85,22 @@ class FakeUserModel {
     return user;
   }
 
-  static findOne({ email }) { return new FakeQuery(usersByEmail.get(email) ?? null); }
+  static findOne(filter) {
+    const user = usersByEmail.get(filter.email) ?? null;
+    return new FakeQuery(user && matchesFilter(user, filter) ? user : null);
+  }
   static findById(id) { return new FakeQuery(usersById.get(String(id)) ?? null); }
 
   static async updateOne(filter, update, options = {}) {
     userUpdateOperations.push({ filter, update, options });
     const isActivation = filter.passwordResetOtpStatus === 'pending'
       && update.$set?.passwordResetOtpStatus === 'active';
+    const isConfirmation = filter.passwordResetOtpStatus === 'active'
+      && update.$set?.passwordResetOtpActivationConfirmed === true;
+    if (this.confirmationFailBeforeCommit && isConfirmation) {
+      this.confirmationFailBeforeCommit = false;
+      throw new Error('simulated confirmation write failure before commit');
+    }
     if (this.failActivation && isActivation) {
       this.failActivation = false;
       throw new Error('simulated activation database failure');
@@ -96,10 +110,6 @@ class FakeUserModel {
       && update.$set?.passwordResetOtpStatus === 'pending') {
       throw new Error('simulated rollback database failure');
     }
-    if (this.failCleanup && filter.passwordResetOtpStatus === undefined && filter.passwordResetOtpHash
-      && update.$unset?.passwordResetOtpStatus) {
-      throw new Error('simulated cleanup database failure');
-    }
     const user = [...usersByEmail.values()].find((candidate) => matchesFilter(candidate, filter));
     if (!user) return { acknowledged: true, matchedCount: 0, modifiedCount: 0 };
     for (const [key, value] of Object.entries(update.$set ?? {})) user[key] = value;
@@ -108,6 +118,10 @@ class FakeUserModel {
     if (this.activationCommitThenLoseAck && isActivation) {
       this.activationCommitThenLoseAck = false;
       throw new Error('simulated lost activation acknowledgement after commit');
+    }
+    if (this.confirmationCommitThenLoseAck && isConfirmation) {
+      this.confirmationCommitThenLoseAck = false;
+      throw new Error('simulated lost activation marker acknowledgement after commit');
     }
     return { acknowledged: true, matchedCount: 1, modifiedCount: 1 };
   }
@@ -134,20 +148,24 @@ function resetFixtures() {
   usersById = new Map();
   nextId = 1;
   userUpdateOperations = [];
-  FakeUserModel.failCleanup = false;
   FakeUserModel.failActivation = false;
   FakeUserModel.activationCommitThenLoseAck = false;
+  FakeUserModel.confirmationCommitThenLoseAck = false;
+  FakeUserModel.confirmationFailBeforeCommit = false;
   FakeUserModel.failActivationRollback = false;
 }
 
 function createResetApp({
   emailProvider,
+  outboxModel,
   rateLimitModel,
   clock = () => initialTime,
   enabled = true,
   sessionStore = new session.MemoryStore(),
 } = {}) {
+  const backgroundTasks = [];
   const sentEmails = [];
+  const EmailOutboxModel = outboxModel ?? createFakeEmailOutboxModel();
   const provider = emailProvider ?? {
     async send(message) { sentEmails.push(message); return { sent: true }; },
   };
@@ -155,13 +173,21 @@ function createResetApp({
     sessionStore,
     UserModel: FakeUserModel,
     PasswordResetRateLimitModel: rateLimitModel ?? createFakeRateLimitModel(),
+    EmailOutboxModel,
     passwordResetEmailEnabled: enabled,
     passwordResetOtpPepper: pepper,
     passwordResetEmailProvider: provider,
     passwordResetRateLimitSecret: rateLimitSecret,
     passwordResetNow: () => new Date(clock()),
+    backgroundTaskScheduler(task) { backgroundTasks.push(task); },
   });
-  return { app, sentEmails, sessionStore };
+  taskQueues.set(app, backgroundTasks);
+  return { app, sentEmails, sessionStore, EmailOutboxModel };
+}
+
+async function drainBackgroundTasks(server) {
+  const queue = serverTaskQueues.get(server) ?? [];
+  while (queue.length) await queue.shift()();
 }
 
 async function listen(app) {
@@ -171,6 +197,7 @@ async function listen(app) {
     server.once('error', reject);
   });
   servers.add(server);
+  serverTaskQueues.set(server, taskQueues.get(app) ?? []);
   return server;
 }
 
@@ -184,7 +211,7 @@ afterEach(async () => {
   await Promise.all([...servers].map(close));
 });
 
-async function requestAt(server, path, { method = 'GET', body, cookie, origin = 'http://localhost:5173' } = {}) {
+async function requestAt(server, path, { method = 'GET', body, cookie, origin = 'http://localhost:5173', drainBackground = true } = {}) {
   const headers = { Origin: origin };
   if (cookie) headers.Cookie = cookie;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -194,6 +221,7 @@ async function requestAt(server, path, { method = 'GET', body, cookie, origin = 
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const responseBody = response.status === 204 ? null : await response.json();
+  if (drainBackground && path === '/api/auth/password-reset/request') await drainBackgroundTasks(server);
   return {
     response,
     body: responseBody,
@@ -237,14 +265,14 @@ async function completeReset(server, email, otp, overrides = {}) {
 test('request issues a cryptographically generated six-digit OTP stored only as a peppered HMAC with an exact ten-minute expiry', async () => {
   resetFixtures();
   const clock = { value: initialTime };
-  const { app, sentEmails } = createResetApp({ clock: () => clock.value });
+  const { app, sentEmails, EmailOutboxModel } = createResetApp({ clock: () => clock.value });
   const server = await listen(app);
   await createStudent();
 
   const result = await issueOtp(server);
   assert.equal(result.response.status, 202);
   assert.equal(result.response.headers.get('cache-control'), 'no-store');
-  assert.equal(result.body.message, 'If an account exists, an email with password reset instructions will be sent.');
+  assert.equal(result.body.message, 'If this address is eligible, a reset request is being processed. This response does not confirm account status or email delivery.');
   assert.equal(result.body.message.includes(otpFrom(sentEmails[0])), false);
   assert.equal(sentEmails.length, 1);
   assert.equal(sentEmails[0].to, 'student@example.test');
@@ -278,11 +306,25 @@ test('disabled email configuration does not send mail or permit password changes
   assert.equal(user.passwordResetOtpHash, undefined);
 });
 
+test('request does not return success when the durable outbox insert fails', async () => {
+  resetFixtures();
+  class UnavailableOutboxModel { static async create() { throw new Error('database unavailable'); } }
+  const { app, sentEmails } = createResetApp({ outboxModel: UnavailableOutboxModel });
+  const server = await listen(app);
+  const user = await createStudent();
+
+  const result = await issueOtp(server);
+  assert.equal(result.response.status, 503);
+  assert.equal(result.response.headers.get('cache-control'), 'no-store');
+  assert.equal(sentEmails.length, 0);
+  assert.equal(user.passwordResetOtpHash, undefined);
+});
+
 test('registered, nonexistent, admin-only, and delivery-failure requests return the same generic 202 response', async () => {
   resetFixtures();
   const messages = [];
   let failDelivery = false;
-  const { app } = createResetApp({ emailProvider: {
+  const { app, EmailOutboxModel } = createResetApp({ emailProvider: {
     async send(message) {
       messages.push(message);
       if (failDelivery) throw new Error('provider secret and response detail');
@@ -299,8 +341,6 @@ test('registered, nonexistent, admin-only, and delivery-failure requests return 
   const admin = await issueOtp(server, 'admin@example.test');
   failDelivery = true;
   const failedDelivery = await issueOtp(server, 'student2@example.test');
-  await createStudent('student2@example.test');
-  // Retry after a failed delivery is cooldown-limited and still reveals no state.
 
   for (const result of [registered, missing, admin, failedDelivery]) {
     assert.equal(result.response.status, 202);
@@ -311,8 +351,10 @@ test('registered, nonexistent, admin-only, and delivery-failure requests return 
   assert.equal(usersByEmail.get('student@example.test').passwordResetOtpHash !== undefined, true);
   assert.equal(usersByEmail.get('admin@example.test').passwordResetOtpHash, undefined);
   assert.equal(usersByEmail.get('admin@example.test').passwordResetOtpStatus, undefined);
-  assert.equal(usersByEmail.get('student2@example.test').passwordResetOtpHash, undefined, 'failed delivery invalidates the issued OTP');
-  assert.equal(usersByEmail.get('student2@example.test').passwordResetOtpStatus, undefined);
+  assert.ok(usersByEmail.get('student2@example.test').passwordResetOtpHash, 'the encrypted outbox retains a retryable pending challenge');
+  assert.equal(usersByEmail.get('student2@example.test').passwordResetOtpStatus, 'pending');
+  assert.equal(usersByEmail.get('student2@example.test').passwordResetOtpActivationConfirmed, false);
+  assert.equal(EmailOutboxModel.documents().find((job) => job._id === usersByEmail.get('student2@example.test').passwordResetOtpDeliveryJobId)?.status, 'queued');
   assert.equal(JSON.stringify(failedDelivery.body).includes('provider secret'), false);
   const failedDeliveryOtp = otpFrom(messages[1]);
   assert.equal((await completeReset(server, 'student2@example.test', failedDeliveryOtp)).response.status, 400);
@@ -352,7 +394,71 @@ test('pending OTP is rejected until email delivery completes and the exact chall
   assert.equal((await completeReset(server, user.email, otp)).response.status, 200);
 });
 
-test('email failure followed by MongoDB cleanup failure leaves the OTP pending and unusable', async () => {
+test('generic reset response completes while an eligible-account email provider is still pending', async () => {
+  resetFixtures();
+  let releaseDelivery;
+  let signalDeliveryStarted;
+  const deliveryStarted = new Promise((resolve) => { signalDeliveryStarted = resolve; });
+  const deliveryGate = new Promise((resolve) => { releaseDelivery = resolve; });
+  const { app } = createResetApp({ emailProvider: { async send() { signalDeliveryStarted(); await deliveryGate; return { sent: true }; } } });
+  const server = await listen(app);
+  await createStudent();
+
+  const eligible = await requestAt(server, '/api/auth/password-reset/request', {
+    method: 'POST', body: { email: 'student@example.test' }, drainBackground: false,
+  });
+  const eligibleWork = drainBackgroundTasks(server);
+  await deliveryStarted;
+  assert.equal(eligible.response.status, 202);
+  assert.match(eligible.body.message, /does not confirm account status or email delivery/u);
+  assert.equal(usersByEmail.get('student@example.test').passwordResetOtpStatus, 'pending');
+
+  const missing = await requestAt(server, '/api/auth/password-reset/request', {
+    method: 'POST', body: { email: 'missing@example.test' }, drainBackground: false,
+  });
+  assert.deepEqual(missing.body, eligible.body);
+  assert.equal(missing.response.status, 202);
+  releaseDelivery();
+  await eligibleWork;
+  await drainBackgroundTasks(server);
+});
+
+test('committed reset activation marker with lost acknowledgement remains usable only from persisted active-and-confirmed state', async () => {
+  resetFixtures();
+  const { app, sentEmails } = createResetApp();
+  const server = await listen(app);
+  const user = await createStudent();
+  FakeUserModel.confirmationCommitThenLoseAck = true;
+  FakeUserModel.failActivationRollback = true;
+
+  await issueOtp(server);
+  assert.equal(user.passwordResetOtpStatus, 'active');
+  assert.equal(user.passwordResetOtpActivationConfirmed, true, 'the simulated marker write committed before its acknowledgement was lost');
+  const otp = otpFrom(sentEmails[0]);
+  assert.equal((await completeReset(server, user.email, otp)).response.status, 200);
+  assert.equal(user.passwordResetOtpHash, undefined);
+  assert.equal(user.studentSessionVersion, 1);
+});
+
+test('uncommitted reset activation marker with failed rollback remains active-but-unconfirmed and cannot reset the password', async () => {
+  resetFixtures();
+  const { app, sentEmails } = createResetApp();
+  const server = await listen(app);
+  const user = await createStudent();
+  const originalHash = user.passwordHash;
+  FakeUserModel.confirmationFailBeforeCommit = true;
+  FakeUserModel.failActivationRollback = true;
+
+  await issueOtp(server);
+  assert.equal(user.passwordResetOtpStatus, 'active');
+  assert.equal(user.passwordResetOtpActivationConfirmed, false);
+  const result = await completeReset(server, user.email, otpFrom(sentEmails[0]));
+  assert.equal(result.response.status, 400);
+  assert.equal(user.passwordHash, originalHash);
+  assert.equal(user.studentSessionVersion, 0);
+});
+
+test('email failure leaves the retryable OTP pending and unusable without immediate cleanup', async () => {
   resetFixtures();
   let deliveredAttemptedMessage;
   const { app } = createResetApp({ emailProvider: {
@@ -363,13 +469,12 @@ test('email failure followed by MongoDB cleanup failure leaves the OTP pending a
   } });
   const server = await listen(app);
   const user = await createStudent();
-  FakeUserModel.failCleanup = true;
-
   const result = await issueOtp(server);
   const otp = otpFrom(deliveredAttemptedMessage);
   assert.equal(result.response.status, 202);
   assert.equal(user.passwordResetOtpStatus, 'pending');
-  assert.ok(user.passwordResetOtpHash, 'the simulated failed cleanup leaves the digest for this test');
+  assert.ok(user.passwordResetOtpHash, 'the retryable outbox keeps the digest pending until acceptance');
+  assert.equal(user.passwordResetOtpActivationConfirmed, false);
   const completion = await completeReset(server, user.email, otp);
   assert.equal(completion.response.status, 400);
   assert.equal(user.studentSessionVersion, 0);
@@ -442,8 +547,11 @@ test('an older delivery cannot activate its OTP after a newer request replaces t
   const firstOtp = otpFrom(sentEmails[0]);
   clock.value += 60_001;
   const secondRequest = await issueOtp(server);
-  const secondOtp = otpFrom(sentEmails[1]);
   assert.equal(secondRequest.response.status, 202);
+  assert.equal(user.passwordResetOtpDeliveryJobCreatedAt.getTime(), clock.value, 'the second request must own the current challenge');
+  const secondOtp = sentEmails.map(otpFrom).find((code) => createHmac('sha256', pepper)
+    .update(`${user.email}\0${code}`, 'utf8').digest('hex') === user.passwordResetOtpHash);
+  assert.ok(secondOtp, 'the currently reserved digest must correspond to an email sent for the newer job');
   const secondDigest = createHmac('sha256', pepper).update(`${user.email}\0${secondOtp}`, 'utf8').digest('hex');
   assert.equal(user.passwordResetOtpHash, secondDigest);
   assert.equal(user.passwordResetOtpStatus, 'active');

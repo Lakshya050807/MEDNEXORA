@@ -1,6 +1,25 @@
 import mongoose from 'mongoose';
 import { serializeProduct } from './catalog.controller.js';
 import { materialCategories, resourceTypes } from '../models/StudyMaterial.js';
+import { ensureProductAccessRevocation } from '../services/productAccessRevocation.js';
+
+function idOf(value) {
+  if (value && typeof value.toHexString === 'function') return value.toHexString();
+  const id = value?._id ?? value?.id ?? value;
+  if (id && typeof id.toHexString === 'function') return id.toHexString();
+  return id == null ? '' : String(id);
+}
+
+async function resolveQuery(query) {
+  if (typeof query?.lean === 'function') query = query.lean();
+  return await query;
+}
+
+function adminApiError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
 
 function parsePage(value, fallback, max) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -90,7 +109,7 @@ function buildEntityList(Model, { searchFields, populate = [], baseFilter = {} }
   };
 }
 
-function serializeOrder(order, refunds = [], entitlementStatus = 'not-granted') {
+function serializeOrder(order, refunds = [], entitlementStatus = 'not-granted', accessRevocations = []) {
   const student = order.student && typeof order.student === 'object' && (order.student.name || order.student.email)
     ? { id: String(order.student._id ?? order.student.id), name: order.student.name ?? '', email: order.student.email ?? '' }
     : null;
@@ -121,12 +140,20 @@ function serializeOrder(order, refunds = [], entitlementStatus = 'not-granted') 
     })),
     entitlementStatus,
     refundReviewStatus: order.refundReviewStatus ?? 'not-required',
+    accessRevocations: accessRevocations.map((revocation) => ({
+      productId: idOf(revocation.product),
+      actorId: idOf(revocation.actor),
+      reason: revocation.reason,
+      source: revocation.source,
+      refundId: revocation.refund ?? null,
+      recordedAt: revocation.recordedAt ?? null,
+    })),
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
   };
 }
 
-export function createAdminController({ UserModel, OrderModel, RefundModel, ProductModel, ExamModel, SubjectModel, ChapterModel, TopicModel, CourseModel, QuestionBankModel, MockTestModel, PurchasedAccessModel, CourseProgressModel, TestAttemptModel }) {
+export function createAdminController({ UserModel, OrderModel, RefundModel, ProductAccessRevocationModel, ProductModel, ExamModel, SubjectModel, ChapterModel, TopicModel, CourseModel, QuestionBankModel, MockTestModel, PurchasedAccessModel, CourseProgressModel, TestAttemptModel }) {
   const queryHandlers = {
     products: buildEntityList(ProductModel, {
       searchFields: ['title', 'description', 'keywords'],
@@ -277,9 +304,10 @@ export function createAdminController({ UserModel, OrderModel, RefundModel, Prod
             .sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
         ]);
         const orderIds = orders.map((order) => order._id);
-        const [refunds, accesses] = await Promise.all([
+        const [refunds, accesses, accessRevocations] = await Promise.all([
           RefundModel?.find && orderIds.length ? RefundModel.find({ order: { $in: orderIds } }).sort({ createdAt: 1, _id: 1 }).lean() : [],
           PurchasedAccessModel?.find && orderIds.length ? PurchasedAccessModel.find({ order: { $in: orderIds }, source: 'purchase' }).select('order status').lean() : [],
+          ProductAccessRevocationModel?.find && orderIds.length ? ProductAccessRevocationModel.find({ order: { $in: orderIds } }).sort({ recordedAt: 1, _id: 1 }).lean() : [],
         ]);
         const refundsByOrder = new Map();
         for (const refund of refunds) {
@@ -295,12 +323,24 @@ export function createAdminController({ UserModel, OrderModel, RefundModel, Prod
           rows.push(access.status);
           accessByOrder.set(key, rows);
         }
+        const revocationsByOrder = new Map();
+        for (const revocation of accessRevocations) {
+          const key = String(revocation.order);
+          const rows = revocationsByOrder.get(key) ?? [];
+          rows.push(revocation);
+          revocationsByOrder.set(key, rows);
+        }
         const items = orders.map((order) => {
           const statuses = accessByOrder.get(String(order._id)) ?? [];
           const entitlementStatus = !statuses.length ? 'not-granted'
             : statuses.every((status) => status === 'active') ? 'active'
               : statuses.every((status) => status === 'revoked') ? 'revoked' : 'mixed';
-          return serializeOrder(order, refundsByOrder.get(String(order._id)) ?? [], entitlementStatus);
+          return serializeOrder(
+            order,
+            refundsByOrder.get(String(order._id)) ?? [],
+            entitlementStatus,
+            revocationsByOrder.get(String(order._id)) ?? [],
+          );
         });
         return response.status(200).json({ items, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
       } catch (error) {
@@ -313,33 +353,157 @@ export function createAdminController({ UserModel, OrderModel, RefundModel, Prod
         if (!mongoose.isValidObjectId(request.params.orderId)) return response.status(400).json({ message: 'Enter a valid order ID.' });
         const decision = request.body?.decision;
         if (!['keep-access', 'revoke-access'].includes(decision)) return response.status(400).json({ message: 'Choose whether to keep or revoke access for this partial refund.' });
-        const order = await OrderModel.findById(request.params.orderId).lean();
+        const order = await resolveQuery(OrderModel.findById(request.params.orderId));
         if (!order) return response.status(404).json({ message: 'The order could not be found.' });
         if (order.status !== 'partially_refunded') {
           return response.status(409).json({ message: 'This order has no pending partial-refund review.' });
         }
-        if (order.refundReviewStatus === decision) {
-          if (decision === 'revoke-access') await PurchasedAccessModel.updateMany(
-            { order: order._id, source: 'purchase', status: 'active' },
-            { $set: { status: 'revoked', revokedAt: new Date() } },
+
+        if (decision === 'keep-access') {
+          if (order.refundReviewStatus === 'keep-access') {
+            return response.status(200).json({ orderId: idOf(order), decision, status: order.status });
+          }
+          if (order.refundReviewStatus !== 'pending') {
+            return response.status(409).json({ message: 'This refund already has a product-specific or order-wide access decision.' });
+          }
+          const updated = await OrderModel.findOneAndUpdate(
+            { _id: order._id, status: 'partially_refunded', refundReviewStatus: 'pending' },
+            { $set: { refundReviewStatus: 'keep-access' } },
+            { new: true, runValidators: true, writeConcern: { w: 'majority' } },
           );
-          return response.status(200).json({ orderId: String(order._id), decision, status: order.status });
+          const confirmed = updated ?? await resolveQuery(OrderModel.findById(order._id));
+          if (!confirmed || confirmed.refundReviewStatus !== 'keep-access') {
+            return response.status(409).json({ message: 'The refund review changed. Refresh the order and try again.' });
+          }
+          return response.status(200).json({ orderId: idOf(confirmed), decision, status: confirmed.status });
         }
-        if (order.refundReviewStatus !== 'pending') return response.status(409).json({ message: 'This partial refund has already been reviewed.' });
-        const updated = await OrderModel.findOneAndUpdate(
-          { _id: order._id, status: 'partially_refunded', refundReviewStatus: 'pending' },
-          { $set: { refundReviewStatus: decision } },
-          { new: true, runValidators: true },
-        );
-        if (!updated) return response.status(409).json({ message: 'The refund review changed. Refresh the order and try again.' });
-        if (decision === 'revoke-access') {
+
+        // A pre-existing order-wide revoke decision is authoritative and may
+        // be retried to finish cleanup. New decisions are always product-scoped.
+        if (order.refundReviewStatus === 'revoke-access') {
+          if (request.body?.productIds !== undefined) {
+            return response.status(409).json({ message: 'This order already has an order-wide revoke decision. Retry cleanup without a product selection.' });
+          }
+          if (!PurchasedAccessModel?.updateMany) throw adminApiError(503, 'Product access cleanup is temporarily unavailable. Retry safely.');
           await PurchasedAccessModel.updateMany(
-            { order: order._id, source: 'purchase', status: 'active' },
+            { order: order._id, student: idOf(order.student), source: 'purchase', status: 'active' },
             { $set: { status: 'revoked', revokedAt: new Date() } },
+            { writeConcern: { w: 'majority' } },
           );
+          return response.status(200).json({ orderId: idOf(order), decision, status: order.status, reviewStatus: 'revoke-access', productIds: [] });
         }
-        return response.status(200).json({ orderId: String(updated._id), decision: updated.refundReviewStatus, status: updated.status });
-      } catch (error) { return next(error); }
+        if (!['pending', 'keep-access', 'product-specific'].includes(order.refundReviewStatus)) {
+          return response.status(409).json({ message: 'This partial refund has already been reviewed.' });
+        }
+
+        const entitledProductIds = Array.isArray(order.entitledProductIds) && order.entitledProductIds.length
+          ? order.entitledProductIds.map(idOf)
+          : (order.items ?? []).map((item) => idOf(item.product));
+        const allowedProductIds = [...new Set(entitledProductIds.filter(Boolean))];
+        if (!allowedProductIds.length) return response.status(409).json({ message: 'This order does not contain a verifiable product list.' });
+
+        let productIds = request.body?.productIds;
+        if (productIds === undefined) {
+          if (allowedProductIds.length !== 1) {
+            return response.status(400).json({ message: 'Select the product or products whose access should be revoked.' });
+          }
+          productIds = allowedProductIds;
+        }
+        if (!Array.isArray(productIds) || productIds.length < 1 || productIds.length > 100
+          || productIds.some((productId) => !mongoose.isValidObjectId(productId))) {
+          return response.status(400).json({ message: 'Select one or more valid products from this order.' });
+        }
+        const requestedIds = productIds.map((productId) => String(productId));
+        if (new Set(requestedIds).size !== requestedIds.length) return response.status(400).json({ message: 'A product can only be selected once.' });
+        if (requestedIds.some((productId) => !allowedProductIds.includes(productId))) {
+          return response.status(400).json({ message: 'Every selected product must belong to this order.' });
+        }
+        if (!ProductAccessRevocationModel?.updateOne || !ProductAccessRevocationModel?.findOne) {
+          throw adminApiError(503, 'Product access review is temporarily unavailable. Retry safely.');
+        }
+
+        let refundId = null;
+        if (request.body?.refundId !== undefined && request.body.refundId !== null && request.body.refundId !== '') {
+          if (typeof request.body.refundId !== 'string' || request.body.refundId.length > 200 || !RefundModel?.findOne) {
+            return response.status(400).json({ message: 'The selected refund reference is invalid.' });
+          }
+          const refund = await resolveQuery(RefundModel.findOne({
+            order: order._id,
+            providerRefundId: request.body.refundId,
+            status: 'processed',
+            reconciliationStatus: 'verified',
+          }));
+          if (!refund || refund.providerPaymentId !== order.providerPaymentId
+            || refund.currency !== order.currency
+            || !(order.appliedRefundIds ?? []).includes(refund.providerRefundId)) {
+            return response.status(400).json({ message: 'The selected refund is not a verified processed refund for this order.' });
+          }
+          refundId = refund._id;
+        }
+
+        const actorId = request.admin?._id;
+        if (!actorId || !mongoose.isValidObjectId(actorId)) throw adminApiError(503, 'The administrator review could not be verified.');
+        const recordedAt = new Date();
+        try {
+          for (const productId of requestedIds) {
+            await ensureProductAccessRevocation({
+              Model: ProductAccessRevocationModel,
+              orderId: order._id,
+              studentId: idOf(order.student),
+              productId,
+              actorId,
+              refundId,
+              recordedAt,
+            });
+          }
+        } catch {
+          // Do not expose database errors. Any revocation records already
+          // confirmed are authoritative, and retrying the same request is safe.
+          throw adminApiError(503, 'Product access review could not be confirmed. Retry safely.');
+        }
+
+        // Persist an order-level marker for admin reporting only after the
+        // product decisions are durable. It never substitutes for those rows.
+        try {
+          if (['pending', 'keep-access'].includes(order.refundReviewStatus)) {
+            await OrderModel.updateOne(
+              { _id: order._id, status: 'partially_refunded', refundReviewStatus: { $in: ['pending', 'keep-access'] } },
+              { $set: { refundReviewStatus: 'product-specific' } },
+              { writeConcern: { w: 'majority' } },
+            );
+          }
+          const latest = await resolveQuery(OrderModel.findById(order._id));
+          if (!latest || !['product-specific', 'revoke-access'].includes(latest.refundReviewStatus)) {
+            throw adminApiError(503, 'The refund review status could not be confirmed. Retry safely.');
+          }
+        } catch (error) {
+          if (error?.status === 503) throw error;
+          throw adminApiError(503, 'The refund review status could not be confirmed. Retry safely.');
+        }
+
+        if (!PurchasedAccessModel?.updateMany) throw adminApiError(503, 'Product access cleanup is temporarily unavailable. Retry safely.');
+        try {
+          await PurchasedAccessModel.updateMany(
+            { order: order._id, student: idOf(order.student), product: { $in: requestedIds }, source: 'purchase', status: 'active' },
+            { $set: { status: 'revoked', revokedAt: recordedAt } },
+            { writeConcern: { w: 'majority' } },
+          );
+        } catch {
+          // The revocation record already denies protected access. A retry
+          // repairs this denormalized entitlement state.
+          throw adminApiError(503, 'Product access cleanup is incomplete. Retry safely.');
+        }
+        return response.status(200).json({
+          orderId: idOf(order),
+          decision,
+          status: order.status,
+          reviewStatus: 'product-specific',
+          productIds: requestedIds,
+        });
+      } catch (error) {
+        if (error?.status) return response.status(error.status).json({ message: error.message });
+        return next(error);
+      }
     },
   };
 }

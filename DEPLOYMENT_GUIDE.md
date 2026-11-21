@@ -1,6 +1,6 @@
 # MEDNEXORA Production Deployment Guide
 
-This guide prepares the existing application for deployment. It does not mean the app has been deployed or that production infrastructure has been verified. No production domain, database or payment credentials are included here.
+This guide prepares the existing application for deployment. It does not mean the app has been deployed or that production infrastructure has been verified. The owner has purchased `mednexora.site`; DNS, Vercel assignment, HTTPS, email-domain verification, database and payment credentials still require separate owner-controlled setup and verification.
 
 ## 1. Recommended architecture
 
@@ -31,7 +31,7 @@ Set backend variables in the hosting provider's **server-side secret/configurati
 | Variable | Required and format | Scope / sensitive? |
 |---|---|---|
 | `NODE_ENV` | Required: exactly `production` | Backend runtime; not sensitive |
-| `APP_ENV` | Set `staging` for staging or `production` for public production. If omitted with `NODE_ENV=production`, defaults to `production` for backwards-compatible strictness. Production-like runtime accepts only these two values | Backend runtime; not sensitive |
+| `APP_ENV` | Must be explicitly set to `staging` or `production` when `NODE_ENV=production`; production-like runtime accepts only these values | Backend runtime; not sensitive |
 | `PORT` | Host-provided port; defaults to `5000`; integer `1–65535` | Backend runtime; not sensitive |
 | `MONGODB_URI` | Required in production; `mongodb://` or `mongodb+srv://` URI for a TLS-enabled database user | Backend runtime; **sensitive** (contains database credentials) |
 | `SESSION_SECRET` | Required; unique random value of at least 32 bytes; do not use the example placeholder | Backend runtime; **sensitive** |
@@ -44,8 +44,26 @@ Set backend variables in the hosting provider's **server-side secret/configurati
 | `RAZORPAY_KEY_ID` | Required when `APP_ENV=production`; live key ID with the expected `rzp_live_` prefix. Optional in staging; if configured there, it must use `rzp_test_` | Backend runtime; public identifier, but keep it out of frontend configuration |
 | `RAZORPAY_KEY_SECRET` | Required when `APP_ENV=production`; optional in staging while payments are disabled | Backend runtime; **sensitive** |
 | `RAZORPAY_WEBHOOK_SECRET` | Required when `APP_ENV=production` because webhook processing is enabled; optional in staging while webhooks are disabled | Backend runtime; **sensitive** |
-| `PUBLIC_SITE_URL` | Required for sitemap output; confirmed HTTPS site origin only, no path/query/credentials | Frontend build time; not sensitive; consumed by the Node build script, not exposed as a client `VITE_*` variable |
+| `PUBLIC_SITE_URL` | Production: `https://mednexora.site` after Vercel domain assignment and HTTPS verification. Staging: its staging Vercel origin. HTTPS origin only, no path/query/credentials | Frontend build time; not sensitive; consumed by build/config scripts, not exposed as a client `VITE_*` variable |
 | `API_PROXY_TARGET` | Optional development-only Vite proxy origin; defaults to `http://127.0.0.1:5000` | Frontend development environment; not used by production runtime or bundle |
+| `MEDNEXORA_DEPLOYMENT_TARGET` | Vercel only: explicitly `production` or `staging`; choose per project/environment | Vercel build configuration; not sensitive |
+| `MEDNEXORA_STAGING_API_ORIGIN` | Required by staging Vercel config; exact approved staging Railway HTTPS origin | Vercel staging build configuration; not sensitive |
+| `VERCEL_PROJECT_PRODUCTION_URL` | Vercel system variable; config checks it against the expected project domain | Vercel-provided; not a secret |
+| `PASSWORD_RESET_EMAIL_ENABLED` | Optional, defaults `false`; keep false until email-domain verification and controlled test approval | Backend; not sensitive |
+| `REGISTRATION_EMAIL_VERIFICATION_ENABLED` | Optional, defaults `false`; keep false until controlled staging email test is approved | Backend; not sensitive |
+| `RESEND_API_KEY` | Required only when either email feature is enabled; use the provider-issued key, never a placeholder | Backend only; **sensitive** |
+| `PASSWORD_RESET_FROM_EMAIL` | Required only when either email feature is enabled; exact sender address at the domain verified by Resend | Backend only; not sensitive |
+| `PASSWORD_RESET_OTP_PEPPER` | Required only when password-reset email is enabled; unique random secret, at least 32 bytes | Backend only; **sensitive** |
+| `REGISTRATION_OTP_PEPPER` | Required only when registration email verification is enabled; unique random secret, at least 32 bytes and different from the reset pepper | Backend only; **sensitive** |
+| `PUBLIC_BETA_REGISTRATION_ENABLED` | Keep `false` until owner approves public registration and all launch gates | Backend; not sensitive |
+| `PUBLIC_BETA_PAID_PURCHASES_ENABLED` | Keep `false` until owner approves commercial activation and live-payment readiness | Backend; not sensitive |
+| `STAGING_RESTRICTED_REGISTRATION_ENABLED` | Keep `false` for initial staging; may be enabled only for a separately approved, invitation-restricted email test | Backend staging only; not sensitive |
+| `PUBLIC_ABOUT_PAGE_APPROVED` | Keep `false` until the owner has reviewed and approved About Us | Backend; not sensitive |
+| `PUBLIC_CONTACT_PAGE_APPROVED` | Keep `false` until the owner has reviewed and approved Contact Us | Backend; not sensitive |
+| `PUBLIC_FAQ_PAGE_APPROVED` | Keep `false` until the owner has reviewed and approved FAQ | Backend; not sensitive |
+| `PUBLIC_PRIVACY_POLICY_APPROVED` | Keep `false` until the owner has reviewed and approved the Privacy Policy | Backend; not sensitive |
+| `PUBLIC_TERMS_PAGE_APPROVED` | Keep `false` until the owner has reviewed and approved Terms | Backend; not sensitive |
+| `PUBLIC_REFUND_POLICY_APPROVED` | Keep `false` until the owner has reviewed and approved Refund and Cancellation Policy | Backend; not sensitive |
 
 Use a cryptographically random session secret; for example, generate one with Node's `crypto.randomBytes(32)`. Do not paste it into chat, source code, or a frontend environment variable. Store Razorpay values only in backend runtime configuration. The backend checks deployment lane, required credentials, key ID prefix, HTTPS origin, session-secret length and proxy syntax before startup.
 
@@ -151,26 +169,52 @@ The backend uses MongoDB for sessions. Student and administrator sessions use di
 
 3. Publish only `frontend/dist` as the static site.
 4. Configure the edge/reverse proxy to route `/api/*` to the backend first. Route frontend page URLs to `index.html` so direct visits and refreshes on `/login`, `/courses`, `/study-material`, `/admin/login`, and other SPA routes work. Do not route private storage paths directly to a public static origin.
-5. Configure HTTPS and security headers at the static host/CDN. The API sets `X-Content-Type-Options`, frame denial, `Referrer-Policy`, and production HSTS. The static host should set an appropriate CSP and the corresponding security headers; allow only the scripts, fonts, checkout and video providers the app actually uses.
+5. Configure HTTPS and security headers at the static host/CDN. The active Vercel configuration sets CSP, frame denial, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and disables API rewrite caching. The current CSP allows the exact checkout/font/video origins used by the app. Its `img-src https:` source is intentionally scheme-wide because the current admin/catalogue supports HTTPS image URLs without a host allowlist. Review this constraint in a real browser before production; CSP has only been exercised by configuration tests, not a deployed browser.
 
 The current API uses same-origin relative `/api` requests. Hosting the frontend and backend on unrelated origins without a same-origin proxy is not supported by the current configuration.
 
-## 8. Domain and HTTPS later
+## 8. Custom domain, HTTPS and sender-domain preparation
 
-After choosing a domain, configure its DNS records with the hosting provider and provision a valid TLS certificate. Then:
+The purchased domain is `mednexora.site`. The current production Vercel config pins the production API to the production Railway origin, pins the Vercel project identity to `mednexora-8ams.vercel.app`, and sets `https://mednexora.site` as the expected production canonical origin. Staging remains pinned to `mednexora-shk6.vercel.app` and its staging Railway API. Do not attach the public domain to the staging project.
 
-1. Set frontend `PUBLIC_SITE_URL` to the final HTTPS origin and rebuild.
-2. Set backend `APP_ORIGIN` to the exact browser origin. Do not include `/api` or another path.
-3. Confirm the proxy preserves the browser's HTTPS origin and trusts only known proxy addresses in `TRUST_PROXY`.
-4. Confirm the certificate, redirects, cookies and `/api/health` over HTTPS before opening registration.
+### Vercel domain setup (owner action; do not guess DNS values)
 
-No domain has been selected or configured by this preparation.
+The code is prepared for the apex canonical URL `https://mednexora.site`; `www.mednexora.site` should redirect to the apex. Vercel supports either redirect direction, although its documentation recommends `www` as primary for CDN control. The apex choice here follows the current project configuration; changing to `www` would require a reviewed code/config update as well as a hosting redirect change. See [Vercel custom-domain setup](https://vercel.com/docs/domains/set-up-custom-domain) and [domain redirects](https://vercel.com/docs/domains/working-with-domains/deploying-and-redirecting).
+
+1. In the existing **production** Vercel project, open **Settings → Domains**. Confirm this is the project serving `mednexora-8ams.vercel.app`, connected to the intended repository and production branch.
+2. Add `mednexora.site` and `www.mednexora.site` to that production project only. Do not add either to the staging Vercel project.
+3. For each hostname, read the exact verification/DNS records shown by the Vercel dashboard. Enter those values at the domain registrar's DNS panel exactly as provided; do not substitute remembered or generic A/CNAME/TXT values.
+4. Set the `www.mednexora.site` domain's redirect target to `mednexora.site`. Wait for Vercel to report domain verification and provisioned TLS for both names.
+5. Check that `https://www.mednexora.site` redirects to `https://mednexora.site`, the apex serves the production deployment, and HTTP is upgraded to HTTPS.
+6. Only after those checks, set production frontend build variable `PUBLIC_SITE_URL=https://mednexora.site` and backend `APP_ORIGIN=https://mednexora.site`. Keep Vercel production project identity at `mednexora-8ams.vercel.app`; it is a separate Vercel system/project value, not the canonical public URL.
+7. Confirm the production Vercel rewrite still targets the production Railway backend and staging remains on the staging backend. Do not configure a staging custom domain as part of this procedure.
+8. Rebuild and inspect `sitemap.xml`, `robots.txt`, page canonical and Open Graph URLs. The build script emits only `/`, `/target-exams`, `/study-material`, and `/courses`; it does not enumerate dynamic product/course/exam pages. Route metadata is applied client-side, so verify it with a browser/crawler that executes the SPA. Do not submit a sitemap until the canonical domain is verified and public content is ready.
+
+Adding a custom domain can make the currently assigned production deployment reachable at that hostname; it does not deploy new code, but it changes public routing. Before adding it, confirm the owner accepts that exposure, the deployment is the intended production release, unpublished content remains hidden, legal-page approval gates are unchanged, and public registration/purchases are still disabled.
+
+### Resend sender-domain plan (owner action; sending remains disabled)
+
+Resend requires an owned domain to be added and verified before it will send. Resend recommends using a dedicated sending subdomain to isolate transactional-email reputation. A reasonable candidate is `mail.mednexora.site`, but the owner must choose it and add it in the Resend dashboard; it has not been verified here.
+
+1. In Resend, add the chosen sending domain (candidate `mail.mednexora.site`) and select the intended sending region/settings.
+2. Copy the exact DNS records displayed by Resend into the registrar: its SPF-related sender/return-path record(s), DKIM record(s), and any verification records. Do not use values from examples or this repository.
+3. Choose and publish a DMARC policy at `_dmarc.mednexora.site` (or the chosen sender-domain alignment required by the provider). Start with a monitoring policy only if the owner has a mailbox or reporting destination and can review reports; tighten policy only after confirming all legitimate senders are aligned. Do not add an invented `rua` mailbox or enforcement commitment.
+4. Wait for DNS propagation, then use Resend's dashboard to verify the domain and SPF/DKIM status. Domain verification is not established by DNS records merely being entered.
+5. A candidate sender is `no-reply@mail.mednexora.site`; use it only if the owner approves the address and Resend accepts the exact sender format. The backend's `PASSWORD_RESET_FROM_EMAIL` is shared by password-reset and registration verification email.
+6. Keep `PASSWORD_RESET_EMAIL_ENABLED=false`, `REGISTRATION_EMAIL_VERIFICATION_ENABLED=false`, and `STAGING_RESTRICTED_REGISTRATION_ENABLED=false` until separately approved. Do not enter Resend credentials or send mail during this preparation.
+7. After a separately approved controlled test, use a test mailbox to verify reset and registration OTP arrival, expiry, single use, cooldown, resend limits, provider-failure behavior, and that no OTP or secret appears in logs. Public registration must remain closed unless independently approved; paid-purchase gate remains closed.
+
+Password-reset and registration-verification requests persist encrypted delivery jobs in MongoDB with majority acknowledgement before returning the generic `202` response. The outbox stores recipient and one-time message payloads as AES-256-GCM ciphertext; HKDF derives separate purpose-scoped encryption keys from the backend-only OTP peppers. OTPs and invitation tokens are not stored as plaintext in the outbox, and delivery challenges remain unusable until the provider accepts delivery and the activation state is confirmed.
+
+Each API instance polls the shared outbox. Jobs are atomically claimed with a 60-second lease and a random fencing token; stale workers cannot update jobs after another worker takes over. Retries use bounded exponential backoff, stop after eight attempts or challenge expiry, and terminal jobs receive a delayed TTL-cleanup date. A process restart does not discard queued jobs: another worker can claim queued jobs immediately or reclaim a processing job after its lease expires. Do not delete pending/processing rows, rotate OTP peppers while matching jobs are queued, or manually activate a challenge. For recovery, inspect only outbox counts by status, attempts, expiry and oldest queued time; correct the provider/database issue and allow retries. The request response is generic and does not promise delivery. Delivery is at-least-once: if a provider accepts a message but its acknowledgement is lost, a retry may send the same OTP again. The existing challenge identity and activation checks ensure that a delayed job cannot activate a superseded, consumed or expired challenge. If no code arrives, request a new one after the backend cooldown; do not infer account existence from delivery.
+
+Resend documents that the domain must be verified before sending and recommends sending from a subdomain; exact records are generated for each domain in its dashboard. See [Resend Verified Domains](https://resend.com/docs/dashboard/domains/introduction).
 
 ## 9. Razorpay live configuration later
 
 Payment behavior was not changed or exercised as part of deployment preparation. The production environment validator refuses to start unless `RAZORPAY_MODE=live`, the live key ID, API secret and webhook secret are set. Keep API and webhook secrets only in backend runtime configuration. Do not use the test-mode values from `backend/.env.example` in production.
 
-After the payment operator has activated the Razorpay account, configure the live credentials and the webhook URL at `https://<confirmed-domain>/api/payments/webhook` using the production webhook secret. The current handler processes `payment.captured`, `payment.failed`, `refund.created`, `refund.processed` and `refund.failed`; subscribe to these events if refund reconciliation is required. Do not perform a real payment or refund as part of this guide; authorize any controlled live transaction separately.
+After the payment operator has activated the Razorpay account, configure the live credentials and the webhook URL at `https://mednexora.site/api/payments/webhook` using the production webhook secret. The current handler processes `payment.captured`, `payment.failed`, `refund.created`, `refund.processed` and `refund.failed`; subscribe to these events if refund reconciliation is required. Do not perform a real payment or refund as part of this guide; authorize any controlled live transaction separately.
 
 ## 10. Production smoke test
 
@@ -194,6 +238,27 @@ After deployment, perform these checks without exposing credentials:
 - Before any migration, capture a database backup and record the current index catalog. If a migration has changed records or indexes, use a reviewed forward fix or restore plan; do not assume an old binary can safely reverse it.
 - Document who can access backups and periodically test recovery. A backup that has not been restored in a test is not a verified recovery path.
 
+### Manual backup/restore verification checklist
+
+1. Before a planned release or data/index change, record the intended environment/database identity and obtain an owner-approved maintenance window. Do not copy a production URI into a shell transcript or report.
+2. Create a managed snapshot/point-in-time restore point for MongoDB and a separate encrypted archive of the private-file volume. Restrict access to the operator who performs the restore.
+3. Restore both backups into a separate isolated non-production database and storage volume. Never overwrite the source database or mount the production file volume into a test service.
+4. Point an isolated test application only at the restored targets. Verify application startup/index checks, representative record counts and relationships, login with disposable test accounts, and retrieval of a private file using an authorized test entitlement.
+5. Verify the restore is internally consistent: private-file references resolve, access checks still deny unauthenticated/unowned downloads, and payment/order records are read-only during this check. Do not send payment or email.
+6. Record snapshot timestamps, restored target names, checks performed and operator. Keep the backup until the owner accepts the restore test. Do not treat snapshot creation alone as proof of recovery.
+
 ## 12. Current verification limits
 
-The backend and frontend automated suites and frontend production build have passed in the local workspace. That does not verify a live domain, hosting proxy, production MongoDB, durable volume, live Razorpay account, or actual production transaction. The production database indexes and migrations have not been inspected or changed here.
+Local verification for this release candidate: backend 228/228; isolated MongoDB integration 12/12; focused authentication/OTP/payment tests 137/137; frontend Node tests 31/31; Vitest 72/72; Vite production bundle build passed to a new temporary output directory so the existing `frontend/dist` was not overwritten; npm audit reported zero advisories in both dependency trees; `git diff --check` passed. The sitemap was intentionally omitted because the public domain has not been verified. These results do not verify a live domain, hosting proxy, MongoDB deployment, durable volume, live Razorpay account, or actual production transaction.
+
+## 13. Refund accounting and product-level access revocation
+
+Financial refunds remain order-level records in `PaymentRefund`; a refund amount is never divided across line items or bundle resources automatically. A processed partial monetary refund changes the verified refunded total and leaves paid access intact while the review state is `pending`. An administrator may explicitly keep access (`keep-access`) or revoke access for selected product IDs. A selected-product revocation is recorded in the separate `ProductAccessRevocation` collection before the denormalized `PurchasedAccess` row is changed. Its unique `order + product` index makes retries idempotent. The record captures the order, student, product, administrator, reason/source, time, and optional verified refund reference; it does not contain payment credentials or an inferred allocation.
+
+The shared student access service checks the student's active entitlement, the exact linked verified order, product membership in that order's entitlement snapshot, full-refund state, and the durable product-revocation record. A stale active entitlement cannot restore access after a product revocation or full-order refund. If entitlement cleanup fails, access is denied immediately by the authoritative order/revocation record; retry the same admin review to repair the stale access row. Unselected products remain usable when their own order and entitlement checks pass. A full-order refund denies every paid product in the order. Free access records do not require a paid order.
+
+Legacy partial-refund policy: `pending` means a verified partial monetary refund alone has not revoked access; `keep-access` records an explicit order-level keep decision; `product-specific` means per-product revocation records decide access; missing or unknown partial-review state fails closed. A legacy `revoke-access` order state remains an explicit order-wide denial and can be retried to finish cleanup. No backfill infers product allocation from old refund amounts.
+
+The current Admin Orders screen does not select products. The protected `POST /api/admin/orders/:orderId/refund-review` API accepts `{ decision: "revoke-access", productIds: ["..."] }` for multi-product orders. Omitting `productIds` is accepted only when the order resolves to exactly one product, preserving the existing single-product screen. Multi-product revocation therefore requires a future product-selector UI; until then, administrators must not use an order-wide workaround. An optional `refundId` must be the exact provider refund ID for a processed, verified refund on the same order; it is recorded as context only and does not allocate money to that product.
+
+The new model's indexes are initialized through the existing `Model.init()` startup path. There is no destructive migration or backfill. Deploying code that manages this collection will create it and its declared indexes if absent; review any startup index error before proceeding and do not drop indexes or edit records as an automatic workaround.

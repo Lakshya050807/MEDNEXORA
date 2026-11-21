@@ -19,7 +19,10 @@ import PaymentWebhookEvent from './models/PaymentWebhookEvent.js';
 import PaymentRefund from './models/PaymentRefund.js';
 import PasswordResetRateLimit from './models/PasswordResetRateLimit.js';
 import RegistrationVerificationChallenge from './models/RegistrationVerificationChallenge.js';
+import EmailDeliveryOutbox from './models/EmailDeliveryOutbox.js';
+import ProductAccessRevocation from './models/ProductAccessRevocation.js';
 import { ensurePrimaryExamIndex } from './db/ensure-primary-exam-index.js';
+import { startApiServer } from './server-lifecycle.js';
 
 async function ensurePurchaseReservationBackfill(OrderModel) {
   const legacyActiveOrders = await OrderModel.countDocuments({
@@ -35,37 +38,43 @@ async function ensurePurchaseReservationBackfill(OrderModel) {
 }
 
 async function startServer() {
-  await mongoose.connect(env.mongoUri);
-  await ensurePrimaryExamIndex(Exam);
-  await ensurePurchaseReservationBackfill(Order);
-  await Promise.all([
-    User.init(), Exam.init(), Subject.init(), Chapter.init(), Topic.init(), StudyMaterial.init(), Course.init(),
-    QuestionBank.init(), MockTest.init(), TestAttempt.init(), Order.init(), PurchasedAccess.init(), CourseProgress.init(), PaymentWebhookEvent.init(), PaymentRefund.init(), PasswordResetRateLimit.init(), RegistrationVerificationChallenge.init(),
-  ]);
-
-  const sessionStore = MongoStore.create({
-    client: mongoose.connection.getClient(),
-    dbName: mongoose.connection.name,
-    collectionName: 'sessions',
-    ttl: Math.ceil(env.sessionMaxAgeMs / 1000),
-    autoRemove: 'native',
+  await startApiServer({
+    mongooseClient: mongoose,
+    envConfig: env,
+    MongoStoreFactory: MongoStore,
+    createApp,
+    ExamModel: Exam,
+    OrderModel: Order,
+    models: [
+      User, Exam, Subject, Chapter, Topic, StudyMaterial, Course,
+      QuestionBank, MockTest, TestAttempt, Order, PurchasedAccess, ProductAccessRevocation, CourseProgress,
+      PaymentWebhookEvent, PaymentRefund, PasswordResetRateLimit, RegistrationVerificationChallenge, EmailDeliveryOutbox,
+    ],
+    ensurePrimaryExamIndex,
+    ensurePurchaseReservationBackfill,
+    onListening({ server, serverApp, sessionStore }) {
+      console.log(`Nursing learning API listening on port ${env.port}`);
+      const shutdown = () => {
+        server.close(async () => {
+          await serverApp.locals.emailOutbox.stop();
+          await sessionStore.close();
+          await mongoose.disconnect();
+          process.exit(0);
+        });
+      };
+      process.once('SIGINT', shutdown);
+      try {
+        process.once('SIGTERM', shutdown);
+      } catch (error) {
+        process.removeListener('SIGINT', shutdown);
+        throw error;
+      }
+      return () => {
+        process.removeListener('SIGINT', shutdown);
+        process.removeListener('SIGTERM', shutdown);
+      };
+    },
   });
-
-  const serverApp = createApp({ sessionStore });
-  const server = serverApp.listen(env.port, () => {
-    console.log(`Nursing learning API listening on port ${env.port}`);
-  });
-
-  const shutdown = () => {
-    server.close(async () => {
-      await sessionStore.close();
-      await mongoose.disconnect();
-      process.exit(0);
-    });
-  };
-
-  process.once('SIGINT', shutdown);
-  process.once('SIGTERM', shutdown);
 }
 
 startServer().catch(async (error) => {

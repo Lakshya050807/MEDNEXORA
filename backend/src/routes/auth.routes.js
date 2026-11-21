@@ -5,6 +5,7 @@ import { requireStudentAuth } from '../middleware/requireStudentAuth.js';
 import { verifyOrigin } from '../middleware/verifyOrigin.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
 import { createMongoRateLimiter } from '../middleware/mongoRateLimit.js';
+import { normalizeEmail } from '../utils/credentials.js';
 
 export function createAuthRoutes({
   UserModel,
@@ -21,6 +22,8 @@ export function createAuthRoutes({
   passwordResetEmailProvider,
   passwordResetRateLimitSecret,
   passwordResetNow,
+  emailOutbox,
+  backgroundTaskScheduler,
 }) {
   const router = Router();
   const controller = createAuthController({
@@ -35,6 +38,7 @@ export function createAuthRoutes({
     passwordResetEmailEnabled,
     passwordResetOtpPepper,
     now: passwordResetNow,
+    emailOutbox,
   });
   const registrationController = createRegistrationVerificationController({
     UserModel,
@@ -45,10 +49,27 @@ export function createAuthRoutes({
     registrationEmailVerificationEnabled,
     registrationOtpPepper,
     now: registrationNow,
+    emailOutbox,
   });
   const requireStudent = requireStudentAuth({ UserModel });
   router.use(createRateLimiter({ windowMs: 60 * 1000, max: 300 }));
-  const signInLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 20 });
+  const studentLoginIpLimiter = createMongoRateLimiter({
+    RateLimitModel: PasswordResetRateLimitModel,
+    secret: passwordResetRateLimitSecret,
+    scope: 'student-login-ip',
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    unavailableMessage: 'Sign-in is temporarily unavailable.',
+  });
+  const studentLoginAccountLimiter = createMongoRateLimiter({
+    RateLimitModel: PasswordResetRateLimitModel,
+    secret: passwordResetRateLimitSecret,
+    scope: 'student-login-account',
+    keyResolver: (request) => normalizeEmail(request.body?.email),
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    unavailableMessage: 'Sign-in is temporarily unavailable.',
+  });
   const resetRequestLimiter = createMongoRateLimiter({
     RateLimitModel: PasswordResetRateLimitModel,
     secret: passwordResetRateLimitSecret,
@@ -98,8 +119,8 @@ export function createAuthRoutes({
 
   router.post('/registration/request-otp', verifyOrigin, requireRegistrationEnabled, registrationRequestLimiter, registrationController.requestOtp);
   router.post('/registration/verify-otp', verifyOrigin, requireRegistrationEnabled, registrationCompletionLimiter, registrationController.verifyOtp);
-  router.post('/register', verifyOrigin, requireRegistrationEnabled, registrationCompletionLimiter, signInLimiter, controller.register);
-  router.post('/login', verifyOrigin, signInLimiter, controller.login);
+  router.post('/register', verifyOrigin, requireRegistrationEnabled, registrationCompletionLimiter, controller.register);
+  router.post('/login', verifyOrigin, studentLoginIpLimiter, studentLoginAccountLimiter, controller.login);
   router.post('/logout', verifyOrigin, controller.logout);
   router.post('/password-reset/request', verifyOrigin, resetRequestLimiter, controller.requestPasswordReset);
   router.post('/password-reset/complete', verifyOrigin, resetCompletionLimiter, controller.completePasswordReset);

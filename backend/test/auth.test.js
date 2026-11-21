@@ -247,6 +247,13 @@ test('registration and login create a safe profile, access dashboard, and logout
   assert.equal(dashboardAfterLogout.response.headers.get('cache-control'), 'no-store');
 });
 
+test('shared registration fixture explicitly opens ordinary registration without opening paid purchases', () => {
+  assert.deepEqual(registrationTestAppOptions().launchConfig, {
+    registrationEnabled: true,
+    paidPurchasesEnabled: false,
+  });
+});
+
 test('closed public launch gates block only new registration and leave login, profile, logout, and safe launch status available', async () => {
   const existingPassword = 'existing-student-account-password-42';
   const gatedSessionStore = new session.MemoryStore();

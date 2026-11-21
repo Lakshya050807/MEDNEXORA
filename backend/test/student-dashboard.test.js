@@ -1,5 +1,6 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { FakeProductAccessRevocationModel, clearFakeProductAccessRevocations } from './helpers/product-access-revocations.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -136,6 +137,7 @@ const TopicModel = modelFor('topics');
 
 beforeEach(async () => {
   resetRegistrationTestModels();
+  clearFakeProductAccessRevocations();
   privateStorageDir = await mkdtemp(join(tmpdir(), 'nursing-private-download-'));
   const now = new Date('2026-10-21T10:00:00Z');
   const studentId = '507f1f77bcf86cd799430001';
@@ -175,8 +177,8 @@ beforeEach(async () => {
       answerKey: [0, 0, 1, 2].map((correctAnswerIndex, index) => ({ questionId: `507f1f77bcf86cd79943923${index}`, correctAnswerIndex, explanation: 'Private answer key content.' })),
     }],
     access: [
-      { student: studentId, product: ids.productPdf, order: ids.order, status: 'active' },
-      { student: studentId, product: ids.productCourse, order: ids.order, status: 'active' },
+      { student: studentId, product: ids.productPdf, order: ids.order, source: 'purchase', status: 'active' },
+      { student: studentId, product: ids.productCourse, order: ids.order, source: 'purchase', status: 'active' },
     ],
     orders: [order, { ...order, _id: ids.otherOrder, student: otherStudentId, items: [{ product: ids.productFreeMock, titleSnapshot: 'Other student resource', quantity: 1, unitPricePaise: 1 }] }],
     banks: [
@@ -199,6 +201,7 @@ beforeEach(async () => {
     CourseProgressModel,
     TestAttemptModel,
     PurchasedAccessModel,
+    ProductAccessRevocationModel: FakeProductAccessRevocationModel,
     OrderModel,
     QuestionBankModel,
     MockTestModel,
@@ -300,6 +303,24 @@ test('verified owner download proxies only a configured private-origin PDF', asy
   assert.equal(response.response.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(response.body, '%PDF-1.7 student copy');
   assert.equal(fetchedAssetUrl, 'https://files.example.test/private/biology.pdf');
+});
+
+test('a refunded linked order blocks a stale-active paid PDF entitlement while free claims continue to work', async () => {
+  const cookie = await registerAndLogin('asha@example.com', 'Asha Student');
+  const freeClaim = await request(`/api/student/resources/${ids.productFreePdf}/access`, { method: 'POST', cookie, body: {} });
+  assert.equal(freeClaim.response.status, 201);
+
+  rows.orders.find((order) => sameId(order._id, ids.order)).status = 'refunded';
+  const denied = await request(`/api/student/resources/${ids.productPdf}/download`, { cookie });
+  assert.equal(denied.response.status, 403, 'the order state denies access before entitlement revocation runs');
+  assert.equal(fetchedAssetUrl, null, 'no private storage request is made for a refunded purchase');
+
+  const freeDownload = await request(`/api/student/resources/${ids.productFreePdf}/download`, { cookie });
+  assert.equal(freeDownload.response.status, 200, 'a free entitlement does not depend on payment order state');
+  const dashboard = await request('/api/student/dashboard', { cookie });
+  assert.equal(dashboard.response.status, 200);
+  assert.equal(dashboard.body.dashboard.purchased.materials.some((item) => item.id === ids.productPdf), false);
+  assert.equal(dashboard.body.dashboard.purchased.materials.some((item) => item.id === ids.productFreePdf), true);
 });
 
 test('free PDF access is claimed on the server, idempotent, listed in My Library, and isolated per student', async () => {

@@ -8,6 +8,7 @@ import { createRateLimiter } from '../middleware/rateLimit.js';
 import { createMongoRateLimiter } from '../middleware/mongoRateLimit.js';
 import { createAdminUploadController } from '../controllers/admin-upload.controller.js';
 import { createStagingRegistrationInvitationController } from '../controllers/staging-registration-invitation.controller.js';
+import { normalizeAdminUsername } from '../utils/credentials.js';
 
 export function createAdminRoutes({
   UserModel,
@@ -15,6 +16,7 @@ export function createAdminRoutes({
   RefundModel,
   privateStorageDir,
   PurchasedAccessModel,
+  ProductAccessRevocationModel,
   CourseProgressModel,
   RegistrationVerificationChallengeModel,
   PasswordResetRateLimitModel,
@@ -26,7 +28,7 @@ export function createAdminRoutes({
 }) {
   const router = Router();
   const controller = createCatalogController({ ...catalogModels, OrderModel, PurchasedAccessModel });
-  const adminController = createAdminController({ UserModel, OrderModel, RefundModel, PurchasedAccessModel, CourseProgressModel, ...catalogModels });
+  const adminController = createAdminController({ UserModel, OrderModel, RefundModel, PurchasedAccessModel, ProductAccessRevocationModel, CourseProgressModel, ...catalogModels });
   const adminAuth = createAdminAuthController({ UserModel });
   const uploads = createAdminUploadController({ privateStorageDir });
   const registrationInvitations = createStagingRegistrationInvitationController({
@@ -37,8 +39,24 @@ export function createAdminRoutes({
     now: stagingRegistrationNow,
   });
   router.use(createRateLimiter({ windowMs: 60 * 1000, max: 300 }));
-  const adminLoginLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 5 });
-  router.post('/login', verifyOrigin, adminLoginLimiter, adminAuth.login);
+  const adminLoginIpLimiter = createMongoRateLimiter({
+    RateLimitModel: PasswordResetRateLimitModel,
+    secret: passwordResetRateLimitSecret,
+    scope: 'admin-login-ip',
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    unavailableMessage: 'Administrator sign-in is temporarily unavailable.',
+  });
+  const adminLoginAccountLimiter = createMongoRateLimiter({
+    RateLimitModel: PasswordResetRateLimitModel,
+    secret: passwordResetRateLimitSecret,
+    scope: 'admin-login-account',
+    keyResolver: (request) => normalizeAdminUsername(request.body?.username),
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    unavailableMessage: 'Administrator sign-in is temporarily unavailable.',
+  });
+  router.post('/login', verifyOrigin, adminLoginIpLimiter, adminLoginAccountLimiter, adminAuth.login);
   router.post('/logout', verifyOrigin, adminAuth.logout);
   router.use(requireAdminAuth({ UserModel }));
   const stagingInvitationsUnavailable = (_request, response, next) => stagingRestrictedRegistrationEnabled

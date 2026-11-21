@@ -9,6 +9,8 @@ The repository currently pins staging to these assigned service origins:
 
 These are repository configuration values, not a live verification that the domains are still assigned. Confirm both in their dashboards before deployment. A purchased custom domain is not required for this staging plan.
 
+The public domain `mednexora.site` is reserved for the existing production project only. Do not attach `mednexora.site` or `www.mednexora.site` to staging. Keep staging `PUBLIC_SITE_URL` and `APP_ORIGIN` on the assigned staging Vercel origin, and keep the Vercel API rewrite pinned to the staging Railway service.
+
 ## 1. What is and is not enabled initially
 
 Keep these settings closed for the first deployment:
@@ -39,8 +41,10 @@ Set backend values only in the **Railway staging API service Variables panel**. 
 | `SESSION_MAX_AGE_DAYS` | Optional integer 1–30; defaults to `7` | No | Optional |
 | `APP_ORIGIN` | Exactly `https://mednexora-shk6.vercel.app` (origin only) | No | Required |
 | `TRUST_PROXY` | `1` for Railway's single ingress proxy, only if that is the deployed topology and Railway replaces forwarded headers | No | Set after topology check |
-| `PRIVATE_STORAGE_DIR` | Absolute path on a persistent Railway volume. Suggested setup: mount a Railway volume at `/data`, then use `/data/private-files` | No | Required |
+| `PRIVATE_STORAGE_DIR` | `/data/private` inside the persistent Railway volume mounted at `/data`; retain this verified value for the existing staging deployment | No | Required |
 | `PRIVATE_STORAGE_ORIGIN` | Optional HTTPS private-file service origin; leave unset when not using that service | No | Unset |
+
+Keep `PRIVATE_STORAGE_DIR` inside the persistent volume mounted at `/data`. The existing staging deployment uses `/data/private`. Changing this variable alone does not move stored PDFs: their database references use the logical `/private/<UUID>.pdf` path, which the application resolves under the configured directory. A path change without a controlled copy and verification would make existing files unavailable for download. If a move is needed, inventory and back up the volume, copy the files while preserving UUID names and permissions, verify counts and checksums, then change the variable and test authorized downloads. Keep the original files until rollback is no longer needed.
 
 `TRUST_PROXY=1` means the app trusts one proxy hop. Confirm Railway terminates HTTPS and controls/replaces the forwarded protocol header before relying on Secure cookies. Do not use `true`, `*`, or broad proxy trust.
 
@@ -129,7 +133,7 @@ Before a deployment that reuses staging data, have the owner perform read-only c
 
 1. In Railway, select the existing MEDNEXORA **staging** project/environment and the API service whose assigned host is `mednexora-staging-api-staging.up.railway.app`.
 2. Confirm its source is the MEDNEXORA GitHub repository, branch `staging-env-fix`, and Root Directory `backend`. The current local worktree has uncommitted changes, so it is not deployable from GitHub until the owner reviews and publishes an approved commit. Do not deploy the dirty worktree.
-3. Attach a persistent Railway volume at `/data`; set `PRIVATE_STORAGE_DIR=/data/private-files` in the service Variables panel.
+3. Verify the existing persistent Railway volume is mounted at `/data`; retain `PRIVATE_STORAGE_DIR=/data/private` in the service Variables panel. Do not change the path on an existing deployment without the controlled migration described above.
 4. Set the Railway variables from the checklist above. Enter secret values directly in Railway; never put them in a shell command. Use a staging-only Atlas URI and a unique session secret. Keep all launch/email/payment controls in their closed initial state.
 5. In service settings, configure Root Directory `backend`, Build Command `npm ci --omit=dev`, and Start Command `npm start`. Do not set the start/build command to `npm test` or `npm run test:registration-mongodb`.
 6. Set the health check path to `/api/health`. Confirm the deployment is healthy and the endpoint returns HTTP 200 before testing student/admin workflows.
@@ -167,10 +171,32 @@ Only after the owner authorizes a restricted staging test and a sender domain is
 4. For a separate password-reset test, enable `PASSWORD_RESET_EMAIL_ENABLED=true` and add a different `PASSWORD_RESET_OTP_PEPPER`; use only an approved staging test account.
 5. After testing, revoke unused invitations and set both email feature flags and the restricted invitation gate back to `false`. Remove or rotate test-only email credentials/peppers according to the owner's secret-management procedure. Do not broaden either public launch gate.
 
-## 9. Release and rollback guardrails
+## 9. Durable OTP email delivery and recovery
+
+Password-reset and registration-verification messages are queued in MongoDB before the API returns its generic `202` response. The outbox stores the recipient and one-time message payload only as AES-256-GCM ciphertext. Its encryption key is derived with HKDF from the corresponding backend-only OTP pepper; keep the reset and registration peppers separate, stable, and out of Vercel. The encrypted payload and lease fields are excluded from normal model serialization.
+
+Each API instance polls the shared outbox and claims jobs with an atomic MongoDB update and a 60-second lease. The worker uses a one-second poll interval and up to four local workers per process; a crashed worker's job becomes claimable after its lease expires. A lock token fences stale workers from changing the job after another worker has claimed it. Challenge records retain the last delivery-job ID after OTP verification, consumption, or reset as a tombstone; an old retry cannot recreate a consumed code, and a newer request replaces the tombstone with its own ID and later creation time. Multiple instances may therefore work from one MongoDB outbox without a separate queue service.
+
+Delivery uses bounded retries: 5 seconds, then exponential backoff capped at 5 minutes, with at most eight claims. The OTP/job expiry remains ten minutes. An expired or terminal job is made unusable, its encrypted payload is removed, and terminal metadata is eligible for TTL cleanup after 30 days. TTL cleanup is housekeeping only; application expiry and challenge state determine whether a code can be used. Do not manually set a challenge to `active` or `activationConfirmed`, edit job state, or delete a queued job to recover an email.
+
+If MongoDB is unavailable before the outbox insert is majority-acknowledged, the request returns an unavailable response rather than claiming a job was saved. If MongoDB or Resend fails after queueing, the job stays retryable and the challenge remains pending/unusable until a provider acceptance is durably recorded and activation is confirmed, or the challenge expires. A provider may have accepted an email before the process loses its response or MongoDB loses the acceptance-marker acknowledgement; the retry can send the same OTP again. This is at-least-once delivery, not exactly-once email delivery. Re-sending the same code does not create a second active challenge.
+
+For operations, inspect only outbox counts by status, attempt count, expiry, and oldest queued time using staging-only database access. Do not export or display encrypted payload fields, recipient addresses, OTPs, provider responses, or full documents. Correct the underlying Resend/MongoDB availability issue and allow the worker to retry. If the OTP expires before a successful retry, the student should request a new code after the existing cooldown; do not extend expiry or manually activate the old challenge. Do not rotate either OTP pepper while jobs of that type remain queued or processing: queued ciphertext cannot be decrypted with a replacement pepper, and affected challenges will fail closed and expire.
+
+## 10. Release and rollback guardrails
 
 - The current branch contains uncommitted and untracked changes. Review the complete diff before staging an approved, explicitly scoped commit; never deploy directly from this worktree.
 - Keep `main`, production Railway, production Vercel, production MongoDB, and live Razorpay untouched.
 - Do not run scripts named `admin:create`, `course:setup-flagship`, migration/backfill commands, or tests against a Railway-injected MongoDB URI.
 - Preserve a previous staging deployment artifact for rollback. A code rollback does not reverse index changes or undo persistent volume contents.
 - No deployment, remote database connection, email, payment, or hosting-variable update was performed while preparing this runbook.
+
+## 11. Partial refunds and product access decisions
+
+`PaymentRefund` continues to store verified monetary refunds at order scope. Never divide a refund amount among products based on prices or assume it refers to one course/resource. A verified partial refund by itself leaves access unchanged while the order review state is `pending`. An admin can explicitly keep access, or create a product-specific access revocation. A product revocation is written to `ProductAccessRevocation` first, with the exact order, student, product, admin actor, source/reason, timestamp, and optional verified provider refund reference. The unique order/product index makes repeated reviews safe.
+
+The access checker treats the revocation record as authoritative before consulting the mutable entitlement row. If cleanup fails or its acknowledgement is uncertain, the affected product is denied immediately; retry the same review to mark its stale `PurchasedAccess` row revoked. Products not selected remain available if their own active entitlement and verified order checks pass. A full-order refund denies every paid product, even while entitlement cleanup is pending. Free claims with `source: free` and no order remain independent of payment records.
+
+For older records, a partial order in `pending` retains access unless an explicit product revocation exists; `keep-access` is an explicit order-level keep decision; `product-specific` relies on the durable per-product records. Unknown/missing partial-review states fail closed. Historical `revoke-access` remains an order-wide denial. No migration guesses which product an old monetary refund covered. The new collection and its unique order/product plus student/product indexes are initialized by `ProductAccessRevocation.init()` during normal startup; no destructive migration or hosted database edit is part of this code change.
+
+The existing Admin Orders screen has no product selector. The backend accepts `productIds` on the existing refund-review endpoint and refuses an unscoped revoke for multi-product orders; the legacy screen can still revoke an unambiguous single-product order. Add a product selector before administrators use the screen to revoke access within bundles or multi-product orders. Do not bypass the API validation or infer product allocation from refund amounts.

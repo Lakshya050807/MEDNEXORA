@@ -1,6 +1,7 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { FakeRegistrationRateLimitModel, resetRegistrationTestModels } from './helpers/registration.js';
 
 process.env.NODE_ENV = 'test';
 process.env.SESSION_SECRET = 'test-session-secret-with-at-least-32-bytes';
@@ -70,6 +71,7 @@ class FakeUserModel {
 }
 
 beforeEach(async () => {
+  resetRegistrationTestModels();
   nextId = 100;
   forceDuplicateOnCreate = false;
   users = [{
@@ -80,7 +82,11 @@ beforeEach(async () => {
     role: 'student',
     passwordHash: await bcrypt.hash(studentPassword, 4),
   }];
-  const app = createApp({ sessionStore: new session.MemoryStore(), UserModel: FakeUserModel });
+  const app = createApp({
+    sessionStore: new session.MemoryStore(),
+    UserModel: FakeUserModel,
+    PasswordResetRateLimitModel: FakeRegistrationRateLimitModel,
+  });
   server = await new Promise((resolve) => {
     const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
   });

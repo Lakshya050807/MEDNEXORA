@@ -8,13 +8,15 @@ import {
   createVercelConfig,
   PRODUCTION_API_ORIGIN,
   PRODUCTION_SITE_ORIGIN,
+  PRODUCTION_VERCEL_PROJECT_ORIGIN,
+  CONTENT_SECURITY_POLICY,
   STAGING_API_ORIGIN,
   STAGING_SITE_ORIGIN,
 } from '../vercel-config.mjs';
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const stagingProjectHost = new URL(STAGING_SITE_ORIGIN).host;
-const productionProjectHost = new URL(PRODUCTION_SITE_ORIGIN).host;
+const productionProjectHost = new URL(PRODUCTION_VERCEL_PROJECT_ORIGIN).host;
 
 const stagingSettings = {
   deploymentEnv: 'production',
@@ -95,6 +97,36 @@ test('production refuses staging project identity, missing target, and preview r
     ...productionSettings,
     deploymentTarget: undefined,
   }), /must be explicitly set/u);
+});
+
+test('frontend response security headers preserve app and checkout resources without unsafe-eval', () => {
+  const config = createVercelConfig(stagingSettings);
+  const headers = config.headers.find((item) => item.source === '/(.*)')?.headers ?? [];
+  const values = Object.fromEntries(headers.map(({ key, value }) => [key.toLowerCase(), value]));
+  assert.equal(values['content-security-policy'], CONTENT_SECURITY_POLICY);
+  assert.match(values['content-security-policy'], /frame-ancestors 'none'/u);
+  assert.match(values['content-security-policy'], /script-src 'self' https:\/\/checkout\.razorpay\.com/u);
+  assert.match(values['content-security-policy'], /https:\/\/fonts\.googleapis\.com/u);
+  assert.match(values['content-security-policy'], /https:\/\/fonts\.gstatic\.com/u);
+  assert.match(values['content-security-policy'], /https:\/\/www\.youtube-nocookie\.com/u);
+  assert.match(values['content-security-policy'], /https:\/\/player\.vimeo\.com/u);
+  assert.match(values['content-security-policy'], /style-src 'self' 'unsafe-inline'/u);
+  assert.doesNotMatch(values['content-security-policy'], /unsafe-eval|\*/u);
+  assert.equal(values['x-frame-options'], 'DENY');
+  assert.equal(values['x-content-type-options'], 'nosniff');
+  assert.equal(values['referrer-policy'], 'strict-origin-when-cross-origin');
+  assert.equal(values['permissions-policy'], 'camera=(), microphone=(), geolocation=()');
+});
+
+test('production canonical origin is the purchased apex domain while Vercel identity remains pinned', () => {
+  const config = createVercelConfig(productionSettings);
+  assert.equal(PRODUCTION_SITE_ORIGIN, 'https://mednexora.site');
+  assert.equal(PRODUCTION_VERCEL_PROJECT_ORIGIN, 'https://mednexora-8ams.vercel.app');
+  assert.equal(config.rewrites[0].destination, `${PRODUCTION_API_ORIGIN}/api/:path*`);
+  assert.throws(() => createVercelConfig({
+    ...productionSettings,
+    publicSiteUrl: PRODUCTION_VERCEL_PROJECT_ORIGIN,
+  }), /approved production site origin/u);
 });
 
 test('the Vercel config module reads staging settings and fails closed on project mismatch', () => {

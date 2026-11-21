@@ -1,5 +1,6 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { FakeProductAccessRevocationModel, clearFakeProductAccessRevocations } from './helpers/product-access-revocations.js';
 import { createHmac } from 'node:crypto';
 
 process.env.NODE_ENV = 'test';
@@ -12,6 +13,7 @@ const [{ createApp }, session, bcrypt] = await Promise.all([
   import('bcryptjs'),
 ]);
 const { registrationTestAppOptions, withVerifiedRegistration, resetRegistrationTestModels } = await import('./helpers/registration.js');
+const { isVerifiedPurchasedAccess } = await import('../src/services/verifiedProductAccess.js');
 
 const studentOneId = '507f1f77bcf86cd799439201';
 const studentTwoId = '507f1f77bcf86cd799439202';
@@ -51,6 +53,11 @@ let payments;
 let providerOrderCounter;
 let orderCounter;
 let gatewayCreateCount;
+let entitlementCreateGate;
+let entitlementCreateAttempts;
+let failNextEntitlementRevocation;
+let loseCaptureAcknowledgementAfterCommit;
+let loseRefundAcknowledgementAfterCommit;
 let server;
 let baseUrl;
 
@@ -89,6 +96,9 @@ function matchesOrder(order, filter = {}) {
   if (filter.paymentVerifiedAt?.$ne === null && !(order.paymentVerifiedAt instanceof Date)) return false;
   if (filter.appliedRefundIds?.$ne && (order.appliedRefundIds ?? []).includes(filter.appliedRefundIds.$ne)) return false;
   if (filter.reservationStatus && order.reservationStatus !== filter.reservationStatus) return false;
+  if (Array.isArray(filter.reservationProductIds)
+    && (filter.reservationProductIds.length !== (order.reservationProductIds ?? []).length
+      || filter.reservationProductIds.some((id, index) => String(id) !== String(order.reservationProductIds[index])))) return false;
   if (filter.reservationProductIds?.$in && !filter.reservationProductIds.$in.map(String).some((id) => (order.reservationProductIds ?? []).map(String).includes(id))) return false;
   if (filter.reservationExpiresAt?.$lte && !(order.reservationExpiresAt && new Date(order.reservationExpiresAt) <= filter.reservationExpiresAt.$lte)) return false;
   if (typeof filter.status === 'string' && order.status !== filter.status) return false;
@@ -145,6 +155,14 @@ class FakeOrderModel {
       if (!order[key].includes(value)) order[key].push(value);
     }
     order.updatedAt = new Date();
+    if (loseCaptureAcknowledgementAfterCommit && update.$set?.status === 'paid') {
+      loseCaptureAcknowledgementAfterCommit = false;
+      throw new Error('simulated lost acknowledgement after committed capture update');
+    }
+    if (loseRefundAcknowledgementAfterCommit && update.$set?.status === 'refunded') {
+      loseRefundAcknowledgementAfterCommit = false;
+      throw new Error('simulated lost acknowledgement after committed refund update');
+    }
     return order;
   }
   static async updateOne(filter = {}, update = {}) {
@@ -173,11 +191,18 @@ class FakePurchasedAccessModel {
   }
   static findOne(filter = {}) { return new FakeQuery(accesses.find((item) => String(item.student) === String(filter.student) && String(item.product) === String(filter.product)) ?? null); }
   static async create(data) {
+    entitlementCreateAttempts += 1;
     if (accesses.some((item) => String(item.student) === String(data.student) && String(item.product) === String(data.product))) {
       const error = new Error('Duplicate student product access'); error.code = 11000; throw error;
     }
     const item = { ...data, _id: `access-${accesses.length + 1}` };
     accesses.push(item);
+    if (entitlementCreateGate) {
+      const gate = entitlementCreateGate;
+      entitlementCreateGate = null;
+      gate.markCreated();
+      await gate.result;
+    }
     return item;
   }
   static async findOneAndUpdate(filter = {}, update = {}) {
@@ -188,6 +213,10 @@ class FakePurchasedAccessModel {
     return item;
   }
   static async updateMany(filter = {}, update = {}) {
+    if (failNextEntitlementRevocation && filter.source === 'purchase' && filter.status === 'active') {
+      failNextEntitlementRevocation = false;
+      throw new Error('simulated entitlement-store outage during refund revocation');
+    }
     const matched = accesses.filter((entry) => (!filter.order || String(entry.order) === String(filter.order))
       && (!filter.student || String(entry.student) === String(filter.student))
       && (!filter.product || String(entry.product) === String(filter.product))
@@ -201,8 +230,13 @@ class FakePurchasedAccessModel {
 class FakeRefundModel {
   static find(filter = {}) {
     const orderIds = filter.order?.$in?.map(String);
+    const orderId = filter.order && !filter.order.$in ? String(filter.order) : null;
+    const refundIds = filter.providerRefundId?.$in?.map(String);
     return new FakeQuery(refunds.filter((item) => !filter.providerPaymentId || item.providerPaymentId === filter.providerPaymentId)
       .filter((item) => !orderIds || orderIds.includes(String(item.order)))
+      .filter((item) => !orderId || String(item.order) === orderId)
+      .filter((item) => !refundIds || refundIds.includes(String(item.providerRefundId)))
+      .filter((item) => !filter.status || item.status === filter.status)
       .filter((item) => !filter.reconciliationStatus || item.reconciliationStatus === filter.reconciliationStatus));
   }
   static findOne(filter = {}) { return new FakeQuery(refunds.find((item) => item.providerRefundId === filter.providerRefundId) ?? null); }
@@ -269,6 +303,7 @@ const paymentConfig = { keyId: 'rzp_test_public_key', keySecret, webhookSecret, 
 
 beforeEach(async () => {
   resetRegistrationTestModels();
+  clearFakeProductAccessRevocations();
   usersByEmail = new Map();
   usersById = new Map();
   orders = new Map();
@@ -279,6 +314,11 @@ beforeEach(async () => {
   providerOrderCounter = 1;
   orderCounter = 1;
   gatewayCreateCount = 0;
+  entitlementCreateGate = null;
+  entitlementCreateAttempts = 0;
+  failNextEntitlementRevocation = false;
+  loseCaptureAcknowledgementAfterCommit = false;
+  loseRefundAcknowledgementAfterCommit = false;
   server = createApp({
     ...registrationTestAppOptions(),
     sessionStore: new session.MemoryStore(),
@@ -286,6 +326,7 @@ beforeEach(async () => {
     ProductModel: FakeProductModel,
     OrderModel: FakeOrderModel,
     PurchasedAccessModel: FakePurchasedAccessModel,
+    ProductAccessRevocationModel: FakeProductAccessRevocationModel,
     WebhookEventModel: FakeWebhookEventModel,
     RefundModel: FakeRefundModel,
     paymentGateway,
@@ -343,6 +384,7 @@ test('paid-purchase gate blocks new checkout without blocking launch status or p
     ProductModel: FakeProductModel,
     OrderModel: FakeOrderModel,
     PurchasedAccessModel: FakePurchasedAccessModel,
+    ProductAccessRevocationModel: FakeProductAccessRevocationModel,
     WebhookEventModel: FakeWebhookEventModel,
     RefundModel: FakeRefundModel,
     paymentGateway,
@@ -411,6 +453,18 @@ function webhookSignature(rawBody) {
 
 async function sendWebhook(event, entity, eventId, signatureOverride) {
   const rawBody = JSON.stringify({ event, payload: { refund: { entity } } });
+  return request('/api/payments/webhook', {
+    method: 'POST',
+    rawBody,
+    headers: {
+      'X-Razorpay-Signature': signatureOverride ?? webhookSignature(rawBody),
+      'X-Razorpay-Event-Id': eventId,
+    },
+  });
+}
+
+async function sendCaptureWebhook(entity, eventId, signatureOverride) {
+  const rawBody = JSON.stringify({ event: 'payment.captured', payload: { payment: { entity } } });
   return request('/api/payments/webhook', {
     method: 'POST',
     rawBody,
@@ -635,6 +689,151 @@ test('failed payments remain unentitled and a delayed captured webhook is idempo
   assert.equal(orders.get(created.body.order.id).status, 'paid', 'conflicting event reuse cannot downgrade a paid order');
 });
 
+test('concurrent capture webhooks with distinct and duplicate event IDs create one entitlement', async () => {
+  const cookie = await registerAndLogin();
+  const created = await checkout(cookie, productId, 'concurrent-capture-webhook');
+  const payment = {
+    id: 'pay_test_capture_concurrent',
+    order_id: created.body.checkout.providerOrderId,
+    amount: created.body.order.amountPaise,
+    currency: 'INR',
+    status: 'captured',
+    captured: true,
+  };
+  payments.set(payment.id, payment);
+
+  const distinct = await Promise.all([
+    sendCaptureWebhook(payment, 'evt_capture_concurrent_a'),
+    sendCaptureWebhook(payment, 'evt_capture_concurrent_b'),
+  ]);
+  assert.ok(distinct.every((result) => result.response.status === 200));
+  const duplicateEvent = await Promise.all([
+    sendCaptureWebhook(payment, 'evt_capture_concurrent_duplicate'),
+    sendCaptureWebhook(payment, 'evt_capture_concurrent_duplicate'),
+  ]);
+  assert.ok(duplicateEvent.every((result) => result.response.status === 200));
+
+  const order = orders.get(created.body.order.id);
+  assert.equal(order.status, 'paid');
+  assert.equal(order.providerPaymentId, payment.id);
+  assert.equal(order.paymentVerifiedAt instanceof Date, true);
+  assert.equal(accesses.length, 1, 'the unique student/product entitlement is granted once');
+  assert.equal(accesses[0].status, 'active');
+  assert.equal(entitlementCreateAttempts, 1, 'the fake database serializes the unique insert operation');
+  assert.equal([...webhookEvents.values()].filter((event) => event.status === 'processed').length, 3);
+});
+
+test('capture committed with a lost database acknowledgement is safely reconciled on retry', async () => {
+  const cookie = await registerAndLogin();
+  const created = await checkout(cookie, productId, 'capture-lost-ack');
+  const payment = {
+    id: 'pay_test_capture_lost_ack',
+    order_id: created.body.checkout.providerOrderId,
+    amount: created.body.order.amountPaise,
+    currency: 'INR',
+    status: 'captured',
+    captured: true,
+  };
+  payments.set(payment.id, payment);
+  loseCaptureAcknowledgementAfterCommit = true;
+
+  const first = await sendCaptureWebhook(payment, 'evt_capture_lost_ack');
+  assert.equal(first.response.status, 500, 'the simulated post-commit acknowledgement loss is not treated as success');
+  assert.equal(orders.get(created.body.order.id).status, 'paid', 'the database mutation committed before the simulated error');
+  assert.equal(accesses.length, 0, 'the uncertain request does not continue to entitlement grants');
+
+  const retry = await sendCaptureWebhook(payment, 'evt_capture_lost_ack');
+  assert.equal(retry.response.status, 200);
+  assert.equal(orders.get(created.body.order.id).status, 'paid');
+  assert.equal(accesses.length, 1);
+  assert.equal(accesses[0].status, 'active');
+  assert.equal(entitlementCreateAttempts, 1);
+});
+
+test('full refund committed with a lost acknowledgement is not double-counted on retry', async () => {
+  const cookie = await registerAndLogin();
+  const created = await checkout(cookie, productId, 'refund-lost-ack');
+  const { paymentId } = await captureOrder(cookie, created, 'pay_test_refund_lost_ack');
+  loseRefundAcknowledgementAfterCommit = true;
+  const refundEntity = {
+    id: 'rfnd_test_refund_lost_ack',
+    payment_id: paymentId,
+    amount: created.body.order.amountPaise,
+    currency: 'INR',
+    status: 'processed',
+  };
+
+  const first = await sendWebhook('refund.processed', refundEntity, 'evt_refund_lost_ack');
+  assert.equal(first.response.status, 500, 'the request reports the uncertain post-commit outcome');
+  assert.equal(orders.get(created.body.order.id).status, 'refunded');
+  assert.equal(orders.get(created.body.order.id).totalRefundedPaise, created.body.order.amountPaise);
+
+  const retry = await sendWebhook('refund.processed', refundEntity, 'evt_refund_lost_ack');
+  assert.equal(retry.response.status, 200);
+  assert.equal(orders.get(created.body.order.id).totalRefundedPaise, created.body.order.amountPaise);
+  assert.deepEqual(orders.get(created.body.order.id).appliedRefundIds, [refundEntity.id]);
+  assert.equal(refunds.length, 1);
+  assert.equal(accesses.length, 1);
+  assert.equal(accesses[0].status, 'revoked');
+  assert.equal(entitlementCreateAttempts, 1, 'retry does not repeat entitlement creation');
+});
+
+test('a full refund racing capture and entitlement creation leaves no active access', async () => {
+  const cookie = await registerAndLogin();
+  const created = await checkout(cookie, productId, 'capture-refund-race');
+  const paymentId = 'pay_test_capture_refund_race';
+  const capturedPayment = {
+    id: paymentId,
+    order_id: created.body.checkout.providerOrderId,
+    amount: created.body.order.amountPaise,
+    currency: 'INR',
+    status: 'captured',
+    captured: true,
+  };
+  payments.set(paymentId, capturedPayment);
+
+  let signalEntitlementCreated;
+  let releaseEntitlement;
+  const entitlementCreated = new Promise((resolve) => { signalEntitlementCreated = resolve; });
+  const entitlementGate = new Promise((resolve) => { releaseEntitlement = resolve; });
+  entitlementCreateGate = { markCreated: signalEntitlementCreated, result: entitlementGate };
+
+  const captureRawBody = JSON.stringify({ event: 'payment.captured', payload: { payment: { entity: capturedPayment } } });
+  const captureRequest = request('/api/payments/webhook', {
+    method: 'POST',
+    rawBody: captureRawBody,
+    headers: { 'X-Razorpay-Signature': webhookSignature(captureRawBody), 'X-Razorpay-Event-Id': 'evt_capture_refund_race' },
+  });
+  await entitlementCreated;
+  assert.equal(accesses[0].status, 'active', 'the test holds capture after a provisional entitlement insert');
+
+  const refund = await sendWebhook('refund.processed', {
+    id: 'rfnd_test_capture_refund_race',
+    payment_id: paymentId,
+    amount: created.body.order.amountPaise,
+    currency: 'INR',
+    status: 'processed',
+  }, 'evt_refund_during_entitlement_grant');
+  assert.equal(refund.response.status, 200);
+  assert.equal(orders.get(created.body.order.id).status, 'refunded');
+  assert.equal(accesses[0].status, 'revoked');
+
+  releaseEntitlement();
+  const capture = await captureRequest;
+  assert.equal(capture.response.status, 200);
+  assert.equal(orders.get(created.body.order.id).status, 'refunded');
+  assert.equal(accesses[0].status, 'revoked', 'capture reconciliation rechecks the order and cannot restore access');
+  assert.equal(accesses.length, 1, 'concurrent capture does not create a duplicate entitlement');
+
+  const replay = await request('/api/payments/webhook', {
+    method: 'POST',
+    rawBody: captureRawBody,
+    headers: { 'X-Razorpay-Signature': webhookSignature(captureRawBody), 'X-Razorpay-Event-Id': 'evt_capture_refund_race_replay' },
+  });
+  assert.equal(replay.response.status, 200);
+  assert.equal(accesses[0].status, 'revoked');
+});
+
 test('orders and purchase verification are isolated to the authenticated student', async () => {
   const firstCookie = await registerAndLogin('first@example.com');
   const created = await checkout(firstCookie);
@@ -690,10 +889,56 @@ test('a verified full refund revokes the purchase entitlement and blocks PDF dow
   assert.equal(download.response.status, 403);
 });
 
+test('full refund remains fail-closed when revocation fails, then webhook retry and reconciliation repair it idempotently', async () => {
+  const cookie = await registerAndLogin();
+  const created = await checkout(cookie);
+  const { paymentId } = await captureOrder(cookie, created);
+  const originalAccess = accesses[0];
+  const otherProduct = '507f1f77bcf86cd799439299';
+  const otherOrderId = '507f1f77bcf86cd799439298';
+  const studentId = usersByEmail.get('student@example.com')._id;
+  orders.set(otherOrderId, {
+    _id: otherOrderId,
+    student: studentId,
+    status: 'paid',
+    paymentVerifiedAt: new Date(),
+    entitledProductIds: [otherProduct],
+    items: [{ product: otherProduct }],
+  });
+  accesses.push({ student: studentId, product: otherProduct, order: otherOrderId, source: 'purchase', status: 'active' });
+
+  failNextEntitlementRevocation = true;
+  const refundEntity = {
+    id: 'rfnd_test_revoke_outage_1', payment_id: paymentId,
+    amount: created.body.order.amountPaise, currency: 'INR', status: 'processed',
+  };
+  const failedDelivery = await sendWebhook('refund.processed', refundEntity, 'evt_test_revoke_outage_1');
+  assert.equal(failedDelivery.response.status, 500, 'webhook does not claim completion when entitlement repair fails');
+  assert.equal(orders.get(created.body.order.id).status, 'refunded', 'the authoritative order state records the full refund first');
+  assert.equal(originalAccess.status, 'active', 'the test models a crash/outage after refund commit and before revocation');
+
+  const repairedByWebhook = await sendWebhook('refund.processed', refundEntity, 'evt_test_revoke_outage_retry');
+  assert.equal(repairedByWebhook.response.status, 200);
+  assert.equal(originalAccess.status, 'revoked');
+  assert.equal(orders.get(created.body.order.id).totalRefundedPaise, created.body.order.amountPaise);
+  assert.deepEqual(orders.get(created.body.order.id).appliedRefundIds, [refundEntity.id]);
+  assert.equal(refunds[0].reconciliationStatus, 'verified');
+  assert.equal(accesses[1].status, 'active', 'repair is scoped to the refunded order and preserves another valid entitlement');
+
+  originalAccess.status = 'active';
+  originalAccess.revokedAt = null;
+  const repairedByReconciliation = await request(`/api/payments/orders/${created.body.order.id}/reconcile`, { method: 'POST', cookie, body: {} });
+  assert.equal(repairedByReconciliation.response.status, 200);
+  assert.equal(originalAccess.status, 'revoked', 'owner reconciliation repairs an incomplete revocation even when the order is already refunded');
+  assert.equal(accesses[1].status, 'active');
+});
+
 test('partial refunds accumulate, retain access pending review, and revoke only when total reaches capture', async () => {
   const cookie = await registerAndLogin();
   const created = await checkout(cookie);
   const { paymentId } = await captureOrder(cookie, created);
+  // Model the short captured-but-not-yet-settled reservation window.
+  orders.get(created.body.order.id).reservationStatus = 'active';
 
   const first = await sendWebhook('refund.processed', {
     id: 'rfnd_test_partial_refund_1', payment_id: paymentId, amount: 5000, currency: 'INR', status: 'processed',
@@ -703,6 +948,7 @@ test('partial refunds accumulate, retain access pending review, and revoke only 
   assert.equal(order.status, 'partially_refunded');
   assert.equal(order.totalRefundedPaise, 5000);
   assert.equal(order.refundReviewStatus, 'pending');
+  assert.equal(order.reservationStatus, 'active', 'a partial refund keeps the active reservation intact');
   assert.equal(accesses[0].status, 'active', 'partial refund does not automatically revoke access');
 
   const second = await sendWebhook('refund.processed', {
@@ -713,7 +959,57 @@ test('partial refunds accumulate, retain access pending review, and revoke only 
   assert.equal(order.status, 'refunded');
   assert.equal(order.totalRefundedPaise, 20900);
   assert.equal(order.refundReviewStatus, 'not-required');
+  assert.equal(order.reservationStatus, 'released', 'a full refund releases the active reservation');
   assert.equal(accesses[0].status, 'revoked');
+});
+
+test('capture retry cannot restore a product with a durable product-level access revocation', async () => {
+  const cookie = await registerAndLogin();
+  const created = await checkout(cookie);
+  const { paymentId } = await captureOrder(cookie, created);
+  const partial = await sendWebhook('refund.processed', {
+    id: 'rfnd_test_product_revoke_1', payment_id: paymentId, amount: 1000, currency: 'INR', status: 'processed',
+  }, 'evt_test_product_revoke_1');
+  assert.equal(partial.response.status, 200);
+  const order = orders.get(created.body.order.id);
+  const access = accesses.find((entry) => entry.order === order._id);
+  order.refundReviewStatus = 'product-specific';
+  const actorId = '507f1f77bcf86cd799439088';
+  await FakeProductAccessRevocationModel.updateOne(
+    { order: order._id, product: access.product },
+    { $setOnInsert: {
+      order: order._id,
+      student: order.student,
+      product: access.product,
+      actor: actorId,
+      source: 'admin-partial-refund-review',
+      reason: 'product-access-revoked',
+      refund: null,
+      recordedAt: new Date(),
+    } },
+    { upsert: true },
+  );
+  access.status = 'active';
+  access.revokedAt = null;
+  order.accessGrantedAt = null;
+
+  const retry = await sendCaptureWebhook({
+    id: paymentId,
+    order_id: order.providerOrderId,
+    amount: order.amountPaise,
+    currency: order.currency,
+    status: 'captured',
+    captured: true,
+  }, 'evt_test_capture_after_product_revoke');
+  assert.equal(retry.response.status, 200);
+  assert.equal(access.status, 'revoked', 'capture reconciliation repairs stale entitlement without regranting it');
+  assert.equal(await isVerifiedPurchasedAccess({
+    access,
+    OrderModel: FakeOrderModel,
+    ProductAccessRevocationModel: FakeProductAccessRevocationModel,
+    studentId: order.student,
+    productId: access.product,
+  }), false);
 });
 
 test('refund webhook processing is idempotent for duplicate event delivery and distinct event IDs for one refund', async () => {
@@ -749,6 +1045,7 @@ test('refunds arriving before payment capture wait for capture and then reconcil
   }, 'evt_test_refund_before_capture_1');
   assert.equal(early.response.status, 200);
   assert.equal(orders.get(created.body.order.id).status, 'pending');
+  assert.equal(orders.get(created.body.order.id).reservationStatus, 'active', 'an unresolved refund does not release a pending reservation');
   assert.equal(refunds[0].reconciliationStatus, 'awaiting-capture');
   assert.equal(accesses.length, 0, 'refund events never grant entitlements');
 
@@ -760,7 +1057,22 @@ test('refunds arriving before payment capture wait for capture and then reconcil
   });
   assert.equal(captureWebhook.response.status, 200);
   assert.equal(orders.get(created.body.order.id).status, 'refunded');
+  assert.equal(orders.get(created.body.order.id).reservationStatus, 'released', 'full refund reconciliation atomically releases the captured order reservation');
   assert.equal(accesses.length, 0, 'a full refund reconciled before capture prevents access grant');
+
+  // Simulate a legacy/partially repaired refunded order so replay also proves
+  // the idempotent repair path releases a still-active reservation.
+  orders.get(created.body.order.id).reservationStatus = 'active';
+  const duplicateRefund = await sendWebhook('refund.processed', {
+    id: 'rfnd_test_before_capture_1', payment_id: paymentId, amount: 20900, currency: 'INR', status: 'processed',
+  }, 'evt_test_refund_after_capture_replay');
+  assert.equal(duplicateRefund.response.status, 200);
+  assert.equal(orders.get(created.body.order.id).reservationStatus, 'released', 'refund replay does not reacquire the old reservation');
+  assert.equal(orders.get(created.body.order.id).totalRefundedPaise, 20900);
+
+  const nextCheckout = await checkout(cookie, productId, 'checkout_after_full_refund');
+  assert.equal(nextCheckout.response.status, 201, 'a new order can reserve the product after the full refund');
+  assert.equal(orders.get(nextCheckout.body.order.id).reservationStatus, 'active');
 });
 
 test('invalid refund signatures, mismatched payment references and amounts are rejected', async () => {
@@ -797,11 +1109,13 @@ test('failed refunds do not revoke access or increase the verified refunded tota
   const cookie = await registerAndLogin();
   const created = await checkout(cookie);
   const { paymentId } = await captureOrder(cookie, created);
+  orders.get(created.body.order.id).reservationStatus = 'active';
   const pending = await sendWebhook('refund.created', {
     id: 'rfnd_test_failed_1', payment_id: paymentId, amount: 20900, currency: 'INR', status: 'pending',
   }, 'evt_test_pending_refund_1');
   assert.equal(pending.response.status, 200);
   assert.equal(orders.get(created.body.order.id).status, 'paid');
+  assert.equal(orders.get(created.body.order.id).reservationStatus, 'active', 'a pending refund does not release the active reservation');
   assert.equal(accesses[0].status, 'active');
 
   const result = await sendWebhook('refund.failed', {
@@ -809,6 +1123,7 @@ test('failed refunds do not revoke access or increase the verified refunded tota
   }, 'evt_test_failed_refund_1');
   assert.equal(result.response.status, 200);
   assert.equal(orders.get(created.body.order.id).status, 'paid');
+  assert.equal(orders.get(created.body.order.id).reservationStatus, 'active', 'a failed refund does not release the active reservation');
   assert.equal(orders.get(created.body.order.id).totalRefundedPaise, 0);
   assert.equal(refunds[0].reconciliationStatus, 'verified');
   assert.equal(accesses[0].status, 'active');
@@ -830,6 +1145,32 @@ test('cumulative refund attempts cannot exceed the captured amount', async () =>
   assert.equal(refunds.find((item) => item.providerRefundId === 'rfnd_test_cap_2').reconciliationStatus, 'rejected');
   assert.ok(orders.get(created.body.order.id).totalRefundedPaise <= orders.get(created.body.order.id).amountPaise);
   assert.equal(accesses[0].status, 'active');
+});
+
+test('a rejected excessive refund cannot erase a legacy order-wide access-revocation decision', async () => {
+  const cookie = await registerAndLogin();
+  const created = await checkout(cookie);
+  const { paymentId } = await captureOrder(cookie, created);
+  await sendWebhook('refund.processed', {
+    id: 'rfnd_test_legacy_revoke_partial', payment_id: paymentId, amount: 1000, currency: 'INR', status: 'processed',
+  }, 'evt_test_legacy_revoke_partial');
+  const order = orders.get(created.body.order.id);
+  const access = accesses.find((entry) => entry.order === order._id);
+  order.refundReviewStatus = 'revoke-access';
+
+  const excessive = await sendWebhook('refund.processed', {
+    id: 'rfnd_test_legacy_revoke_excessive', payment_id: paymentId, amount: order.amountPaise, currency: 'INR', status: 'processed',
+  }, 'evt_test_legacy_revoke_excessive');
+  assert.equal(excessive.response.status, 200);
+  assert.equal(refunds.find((refund) => refund.providerRefundId === 'rfnd_test_legacy_revoke_excessive').reconciliationStatus, 'rejected');
+  assert.equal(order.refundReviewStatus, 'revoke-access', 'a rejected money event cannot weaken a previous admin decision');
+  assert.equal(await isVerifiedPurchasedAccess({
+    access,
+    OrderModel: FakeOrderModel,
+    ProductAccessRevocationModel: FakeProductAccessRevocationModel,
+    studentId: order.student,
+    productId: access.product,
+  }), false);
 });
 
 test('simultaneous distinct partial refunds cannot race the captured-amount ceiling', async () => {

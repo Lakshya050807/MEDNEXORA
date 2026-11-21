@@ -2,18 +2,15 @@ import { randomBytes, randomInt } from 'node:crypto';
 import { normalizeEmail, validEmail } from '../utils/credentials.js';
 import {
   registrationDigestsMatch,
-  registrationInvitationDigest,
   registrationMaxAttempts,
   registrationOtpDigest,
   registrationOtpLifetimeMs,
   registrationProofDigest,
   registrationProofLifetimeMs,
   registrationInvitationRetentionMs,
-  reserveRegistrationChallenge,
 } from '../services/registrationVerification.js';
-import { registrationVerificationEmail } from '../services/registrationVerificationEmail.js';
 
-const genericRequestMessage = 'If this email address can be used for registration, a verification code will be sent.';
+const genericRequestMessage = 'If this address and request are eligible, a verification code may be sent. This response does not confirm account status or email delivery.';
 const invalidCodeMessage = 'The code is invalid or expired. Request a new code and try again.';
 const unavailableMessage = 'Student registration is temporarily unavailable.';
 
@@ -41,6 +38,7 @@ export function createRegistrationVerificationController({
   registrationEmailVerificationEnabled = false,
   registrationOtpPepper = '',
   now = () => new Date(),
+  emailOutbox,
 }) {
   const restrictedMode = () => stagingRestrictedRegistrationEnabled;
   const featureAvailable = () => (registrationEnabled || stagingRestrictedRegistrationEnabled)
@@ -58,129 +56,20 @@ export function createRegistrationVerificationController({
       const restricted = restrictedMode();
       const invitationToken = typeof request.body?.invitationToken === 'string'
         ? request.body.invitationToken.trim() : '';
-      const invitationTokenValid = /^[A-Za-z0-9_-]{43}$/u.test(invitationToken);
-      const invitationDigest = restricted ? registrationInvitationDigest(invitationToken || 'invalid-token') : '';
-
       const otp = String(randomInt(0, 1_000_000)).padStart(6, '0');
-      const digest = registrationOtpDigest(email, otp, registrationOtpPepper);
-      const reservedAt = now();
       try {
-        // Always perform both lookups in restricted mode so an existing
-        // account and an invalid invitation receive the same generic response.
-        const [existingUser, invitationChallenge] = await Promise.all([
-          UserModel.exists({ email }),
-          restricted
-            ? ChallengeModel.findOne({
-              email,
-              invitations: { $elemMatch: {
-                tokenDigest: invitationDigest,
-                status: 'active',
-                expiresAt: { $gt: reservedAt },
-              } },
-            }).select('+invitations.tokenDigest')
-            : Promise.resolve(null),
-        ]);
-        const invitation = invitationTokenValid && invitationChallenge?.invitations?.find((entry) => entry.status === 'active'
-          && entry.expiresAt > reservedAt
-          && registrationDigestsMatch(entry.tokenDigest, invitationDigest));
-        if (!existingUser && (!restricted || (invitation && invitationChallenge))) {
-          const reserved = await reserveRegistrationChallenge({
-            ChallengeModel,
-            email,
-            digest,
-            now: reservedAt,
-            ...(restricted ? {
-              matchFilter: {
-                invitationId: invitation._id,
-                invitations: { $elemMatch: {
-                  _id: invitation._id,
-                  tokenDigest: invitationDigest,
-                  status: 'active',
-                  expiresAt: { $gt: reservedAt },
-                } },
-              },
-              allowCreate: false,
-              invitationId: invitation._id,
-              cleanupAt: new Date(invitation.expiresAt.getTime() + registrationInvitationRetentionMs),
-            } : {}),
-          });
-
-          if (reserved) {
-            try {
-              const message = registrationVerificationEmail(otp);
-              const delivery = await emailProvider.send({ to: email, ...message });
-              if (delivery?.sent !== true) throw new Error('Email delivery failed.');
-            } catch {
-              // The challenge remains unusable even if this cleanup fails:
-              // verification only accepts status=active.
-              await ChallengeModel.updateOne({ email, otpDigest: digest, status: 'pending' }, {
-                $set: { status: 'pending' },
-                $unset: { otpDigest: 1, verificationProofDigest: 1, activationConfirmed: 1 },
-              }, { writeConcern: { w: 'majority' } }).catch(() => {});
-              return response.status(202).json({ message: genericRequestMessage });
-            }
-
-            try {
-              const activatedAt = now();
-              const activationIdentity = {
-                email,
-                otpDigest: digest,
-                expiresAt: { $gt: activatedAt },
-                ...(restricted ? {
-                  invitationId: invitation._id,
-                  invitations: { $elemMatch: {
-                    _id: invitation._id,
-                    tokenDigest: invitationDigest,
-                    status: 'active',
-                    expiresAt: { $gt: activatedAt },
-                  } },
-                } : {}),
-              };
-              const activated = await ChallengeModel.updateOne({
-                ...activationIdentity,
-                status: 'pending',
-              }, { $set: { status: 'active', activationConfirmed: false } }, {
-                runValidators: true,
-                writeConcern: { w: 'majority' },
-              });
-              if (!updateMatched(activated)) {
-                return response.status(202).json({ message: genericRequestMessage });
-              }
-
-              // Only an acknowledged active transition can reach this write.
-              // A commit whose activation acknowledgement was lost therefore
-              // cannot pass the marker check used by OTP verification.
-              const confirmed = await ChallengeModel.updateOne({
-                ...activationIdentity,
-                status: 'active',
-                activationConfirmed: false,
-              }, { $set: { activationConfirmed: true } }, {
-                runValidators: true,
-                writeConcern: { w: 'majority' },
-              });
-              if (!updateMatched(confirmed)) {
-                return response.status(202).json({ message: genericRequestMessage });
-              }
-            } catch {
-              // Roll back only an unconfirmed activation. If this fails after
-              // an ambiguous write, activationConfirmed=false still prevents
-              // the code from being verified.
-              await ChallengeModel.updateOne({
-                email,
-                otpDigest: digest,
-                status: 'active',
-                activationConfirmed: false,
-              }, {
-                $set: { status: 'pending', activationConfirmed: false },
-              }, { writeConcern: { w: 'majority' } }).catch(() => {});
-            }
-          }
-        }
-
-        return response.status(202).json({ message: genericRequestMessage });
-      } catch (error) {
-        return next(error);
+        await emailOutbox.enqueue({
+          type: 'registration-verification',
+          payload: { email, otp, ...(restricted ? { invitationToken } : {}) },
+          expiresAt: new Date(now().getTime() + registrationOtpLifetimeMs),
+        });
+      } catch {
+        console.error('Registration verification email could not be queued.');
+        return genericRegistrationUnavailable(response);
       }
+      response.status(202).json({ message: genericRequestMessage });
+      try { emailOutbox.wake(); } catch { /* The durable poller will retry after another wake or process restart. */ }
+      return undefined;
     },
 
     verifyOtp: async (request, response, next) => {
@@ -246,7 +135,7 @@ export function createRegistrationVerificationController({
                 ...invitationFilter,
               }, {
                 $set: { attempts: registrationMaxAttempts, status: 'locked' },
-                $unset: { otpDigest: 1, verificationProofDigest: 1, activationConfirmed: 1 },
+              $unset: { otpDigest: 1, verificationProofDigest: 1, activationConfirmed: 1 },
               }, { runValidators: true, writeConcern: { w: 'majority' } });
             }
           }

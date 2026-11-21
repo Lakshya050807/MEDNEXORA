@@ -24,7 +24,7 @@ const orderSchema = new mongoose.Schema({
   accessGrantedAt: { type: Date, default: null },
   totalRefundedPaise: { type: Number, default: 0, min: 0, validate: Number.isSafeInteger },
   appliedRefundIds: { type: [String], default: [] },
-  refundReviewStatus: { type: String, enum: ['not-required', 'pending', 'keep-access', 'revoke-access'], default: 'not-required' },
+  refundReviewStatus: { type: String, enum: ['not-required', 'pending', 'keep-access', 'revoke-access', 'product-specific'], default: 'not-required' },
   paymentProvider: { type: String, enum: ['none', 'razorpay'], default: 'none' },
   providerOrderId: { type: String, trim: true, maxlength: 200, default: '' },
   providerPaymentId: { type: String, trim: true, maxlength: 200, default: '' },

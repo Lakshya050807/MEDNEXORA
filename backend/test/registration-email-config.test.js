@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const probe = "const { env } = await import('./src/config/env.js'); process.stdout.write(JSON.stringify({ enabled: env.registrationEmailVerificationEnabled, pepperConfigured: Boolean(env.registrationOtpPepper), providerConfigured: Boolean(env.resendApiKey && env.passwordResetFromEmail), restrictedEnabled: env.stagingRestrictedRegistrationEnabled, invitationTtlMinutes: env.stagingRegistrationInvitationTtlMinutes, publicRegistrationEnabled: env.publicRegistrationEnabled, paidPurchasesEnabled: env.paidPurchasesEnabled }));";
+const registrationFixtureProbe = "const { env } = await import('./src/config/env.js'); const { registrationTestAppOptions } = await import('./test/helpers/registration.js'); const { launchConfig } = registrationTestAppOptions(); process.stdout.write(JSON.stringify({ parentRegistrationEnabled: env.publicRegistrationEnabled, parentPaidPurchasesEnabled: env.paidPurchasesEnabled, fixtureRegistrationEnabled: launchConfig.registrationEnabled, fixturePaidPurchasesEnabled: launchConfig.paidPurchasesEnabled }));";
 const baseEnv = {
   PATH: process.env.PATH,
   SystemRoot: process.env.SystemRoot,
@@ -22,6 +23,14 @@ function readConfig(overrides = {}, environment = baseEnv) {
   return spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
     cwd: process.cwd(),
     env: { ...environment, ...overrides },
+    encoding: 'utf8',
+  });
+}
+
+function readRegistrationFixture(overrides = {}) {
+  return spawnSync(process.execPath, ['--input-type=module', '-e', registrationFixtureProbe], {
+    cwd: process.cwd(),
+    env: { ...baseEnv, ...overrides },
     encoding: 'utf8',
   });
 }
@@ -57,6 +66,20 @@ test('disabled registration email verification does not require provider credent
   const result = readConfig({ REGISTRATION_EMAIL_VERIFICATION_ENABLED: 'false' });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), { enabled: false, pepperConfigured: false, providerConfigured: false, restrictedEnabled: false, invitationTtlMinutes: 120, publicRegistrationEnabled: true, paidPurchasesEnabled: true });
+});
+
+test('registration test fixtures override an inherited closed gate and keep paid purchases closed', () => {
+  const result = readRegistrationFixture({
+    PUBLIC_BETA_REGISTRATION_ENABLED: 'false',
+    PUBLIC_BETA_PAID_PURCHASES_ENABLED: 'true',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    parentRegistrationEnabled: false,
+    parentPaidPurchasesEnabled: true,
+    fixtureRegistrationEnabled: true,
+    fixturePaidPurchasesEnabled: false,
+  });
 });
 
 test('enabled registration email verification requires its distinct pepper and shared email provider configuration', () => {

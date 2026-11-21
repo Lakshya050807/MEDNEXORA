@@ -29,6 +29,7 @@ const [
   { default: UserSchemaModel },
   { default: ChallengeSchemaModel },
   { default: RateLimitSchemaModel },
+  { default: EmailOutboxSchemaModel },
   { registrationInvitationDigest },
   { hashPassword },
 ] = await Promise.all([
@@ -36,6 +37,7 @@ const [
   import('../src/models/User.js'),
   import('../src/models/RegistrationVerificationChallenge.js'),
   import('../src/models/PasswordResetRateLimit.js'),
+  import('../src/models/EmailDeliveryOutbox.js'),
   import('../src/services/registrationVerification.js'),
   import('../src/utils/credentials.js'),
 ]);
@@ -45,6 +47,7 @@ let databaseConnection;
 let UserModel;
 let ChallengeModel;
 let RateLimitModel;
+let EmailOutboxModel;
 let databaseName;
 let adminHash;
 let server;
@@ -54,6 +57,7 @@ let now;
 let sentEmails;
 let latestOtp;
 let deliveryHold;
+let backgroundTasks;
 
 function assertDisposableLocalUri(uri, expectedDatabaseName) {
   const parsed = new URL(uri);
@@ -112,7 +116,11 @@ async function send(method, path, body, cookie = null) {
 const adminPost = (path, body, cookie = adminCookie) => send('POST', path, body, cookie);
 const adminDelete = (path, cookie = adminCookie) => send('DELETE', path, {}, cookie);
 const issueInvitation = (email, cookie = adminCookie) => adminPost('/api/admin/staging-registration-invitations', { email }, cookie);
-const requestOtp = (email, invitationToken) => send('POST', '/api/auth/registration/request-otp', { email, invitationToken }, null);
+async function requestOtp(email, invitationToken) {
+  const result = await send('POST', '/api/auth/registration/request-otp', { email, invitationToken }, null);
+  while (backgroundTasks.length) await backgroundTasks.shift()();
+  return result;
+}
 const verifyOtp = (email, otp) => send('POST', '/api/auth/registration/verify-otp', { email, otp }, null);
 
 async function registerStudent({ email, invitationToken, verificationToken, password = 'integration-student-password-only-2026' }) {
@@ -168,7 +176,8 @@ before(async () => {
   UserModel = databaseConnection.model('User', UserSchemaModel.schema);
   ChallengeModel = databaseConnection.model('RegistrationVerificationChallenge', ChallengeSchemaModel.schema);
   RateLimitModel = databaseConnection.model('PasswordResetRateLimit', RateLimitSchemaModel.schema);
-  await Promise.all([UserModel.init(), ChallengeModel.init(), RateLimitModel.init()]);
+  EmailOutboxModel = databaseConnection.model('EmailDeliveryOutbox', EmailOutboxSchemaModel.schema);
+  await Promise.all([UserModel.init(), ChallengeModel.init(), RateLimitModel.init(), EmailOutboxModel.init()]);
 
   const buildInfo = await databaseConnection.db.admin().command({ buildInfo: 1 });
   assert.equal(buildInfo.version, mongoVersion, 'the test must run against the pinned real MongoDB server version');
@@ -180,11 +189,13 @@ beforeEach(async () => {
     UserModel.deleteMany({}),
     ChallengeModel.deleteMany({}),
     RateLimitModel.deleteMany({}),
+    EmailOutboxModel.deleteMany({}),
   ]);
   now = new Date();
   sentEmails = [];
   latestOtp = null;
   deliveryHold = null;
+  backgroundTasks = [];
   adminCookie = null;
 
   await UserModel.create({
@@ -214,6 +225,7 @@ beforeEach(async () => {
     sessionStore: new session.MemoryStore(),
     UserModel,
     RegistrationVerificationChallengeModel: ChallengeModel,
+    EmailOutboxModel,
     PasswordResetRateLimitModel: RateLimitModel,
     registrationEnabled: false,
     launchConfig: { registrationEnabled: false, paidPurchasesEnabled: false },
@@ -229,6 +241,7 @@ beforeEach(async () => {
     passwordResetNow: () => new Date(now),
     secureCookies: false,
     trustProxy: false,
+    backgroundTaskScheduler(task) { backgroundTasks.push(task); },
   });
   server = await new Promise((resolve, reject) => {
     const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
@@ -312,9 +325,18 @@ test('Mongo-backed limiter shares atomic counters and rejects excess requests', 
     max: 3,
     now: () => new Date(now),
   });
-  const results = await Promise.all(Array.from({ length: 8 }, async () => {
+  const secondInstanceLimit = createMongoRateLimiter({
+    RateLimitModel,
+    secret: limiterSecret,
+    scope: 'registration-request',
+    windowMs: 60_000,
+    max: 3,
+    now: () => new Date(now),
+  });
+  const results = await Promise.all(Array.from({ length: 8 }, async (_value, index) => {
     const response = makeRequestResponse();
-    await limit({ ip: '127.0.0.1', socket: { remoteAddress: '127.0.0.1' } }, response, (error) => {
+    const limiter = index % 2 ? limit : secondInstanceLimit;
+    await limiter({ ip: '127.0.0.1', socket: { remoteAddress: '127.0.0.1' } }, response, (error) => {
       if (error) throw error;
     });
     return response.statusCode;
@@ -392,6 +414,15 @@ test('pending OTP cannot verify before provider acceptance; successful delivery 
   deliveryHold = hold;
   const pendingRequest = requestOtp('pending@example.test', invitation.token);
   await hold.started;
+  const rawOutboxJob = await databaseConnection.db.collection(EmailOutboxModel.collection.name).findOne({
+    type: 'registration-verification',
+    status: 'processing',
+  });
+  assert.ok(rawOutboxJob, 'the request is dispatched only after its MongoDB outbox row has been claimed');
+  assert.ok(rawOutboxJob.payloadCiphertext);
+  assert.equal(JSON.stringify(rawOutboxJob).includes(invitation.token), false, 'the reusable invitation token is encrypted at rest');
+  assert.equal(JSON.stringify(rawOutboxJob).includes(latestOtp), false, 'the OTP is encrypted at rest');
+  assert.equal(JSON.stringify(rawOutboxJob).includes('pending@example.test'), false, 'the recipient address is encrypted at rest');
   const pendingChallenge = await ChallengeModel.findOne({ email: 'pending@example.test' }).select('+otpDigest');
   assert.equal(pendingChallenge.status, 'pending');
   const rejectedPending = await verifyOtp('pending@example.test', latestOtp);
@@ -402,6 +433,9 @@ test('pending OTP cannot verify before provider acceptance; successful delivery 
   const activated = await ChallengeModel.findOne({ email: 'pending@example.test' }).select('+otpDigest');
   assert.equal(activated.status, 'active');
   assert.equal((await verifyOtp('pending@example.test', latestOtp)).response.status, 200);
+  const terminalOutboxJob = await databaseConnection.db.collection(EmailOutboxModel.collection.name).findOne({ _id: rawOutboxJob._id });
+  assert.equal(terminalOutboxJob.status, 'delivered');
+  assert.equal(terminalOutboxJob.payloadCiphertext, undefined, 'terminal jobs remove encrypted message payloads');
 });
 
 test('incorrect OTP attempts update atomically and lock after five concurrent failures', async () => {

@@ -24,6 +24,8 @@ const registrationVerificationChallengeSchema = new mongoose.Schema({
   // A challenge is usable only after activation has been acknowledged and this
   // fence is durably written. An ambiguous activation leaves it false.
   activationConfirmed: { type: Boolean, default: false, select: false },
+  deliveryJobId: { type: String, select: false, maxlength: 64 },
+  deliveryJobCreatedAt: { type: Date, select: false },
   expiresAt: { type: Date, required: true },
   attempts: { type: Number, required: true, default: 0, min: 0, max: 5 },
   lastSentAt: Date,
@@ -38,6 +40,8 @@ const registrationVerificationChallengeSchema = new mongoose.Schema({
       delete returned.verificationProofDigest;
       delete returned.invitationId;
       delete returned.activationConfirmed;
+      delete returned.deliveryJobId;
+      delete returned.deliveryJobCreatedAt;
       for (const invitation of returned.invitations ?? []) delete invitation.tokenDigest;
       delete returned.__v;
       return returned;

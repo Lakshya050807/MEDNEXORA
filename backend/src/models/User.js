@@ -39,6 +39,8 @@ const userSchema = new mongoose.Schema({
   // the field remain unusable until a fresh code is requested.
   passwordResetOtpActivationConfirmed: { type: Boolean, default: false, select: false },
   passwordResetOtpAttempts: { type: Number, min: 0, default: 0, select: false },
+  passwordResetOtpDeliveryJobId: { type: String, select: false, maxlength: 64 },
+  passwordResetOtpDeliveryJobCreatedAt: { type: Date, select: false },
   passwordResetOtpLastSentAt: { type: Date, select: false },
   passwordResetOtpResendWindowStartedAt: { type: Date, select: false },
   passwordResetOtpResendCount: { type: Number, min: 0, default: 0, select: false },
@@ -65,6 +67,8 @@ const userSchema = new mongoose.Schema({
       delete returned.passwordResetOtpStatus;
       delete returned.passwordResetOtpActivationConfirmed;
       delete returned.passwordResetOtpAttempts;
+      delete returned.passwordResetOtpDeliveryJobId;
+      delete returned.passwordResetOtpDeliveryJobCreatedAt;
       delete returned.passwordResetOtpLastSentAt;
       delete returned.passwordResetOtpResendWindowStartedAt;
       delete returned.passwordResetOtpResendCount;

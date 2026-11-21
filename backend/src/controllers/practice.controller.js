@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { hasVerifiedProductAccess } from '../services/verifiedProductAccess.js';
 
 function httpError(status, message) {
   const error = new Error(message);
@@ -98,6 +99,8 @@ export function createPracticeController({
   MockTestModel,
   ProductModel,
   PurchasedAccessModel,
+  OrderModel,
+  ProductAccessRevocationModel,
   TestAttemptModel,
   ExamModel,
   SubjectModel,
@@ -119,8 +122,33 @@ export function createPracticeController({
     if (!product || product.publicationStatus !== 'published') return { allowed: false, product: null };
     if (!Number.isSafeInteger(product.currentPricePaise)) return { allowed: false, product };
     if (product.currentPricePaise === 0) return { allowed: true, product };
-    const access = await PurchasedAccessModel.exists({ student: studentId, product: productId, status: 'active' });
-    return { allowed: Boolean(access), product };
+    const allowed = await hasVerifiedProductAccess({ PurchasedAccessModel, OrderModel, ProductAccessRevocationModel, studentId, productId });
+    return { allowed, product };
+  }
+
+  async function checkAttemptAccess(attempt, studentId) {
+    if (attempt.mode === 'mock') {
+      let query = MockTestModel.findById(attempt.mockTest);
+      if (typeof query?.select === 'function') query = query.select('product');
+      if (typeof query?.lean === 'function') query = query.lean();
+      const mockTest = await query;
+      if (!mockTest?.product || !(await checkProductAccess(mockTest.product, studentId)).allowed) return false;
+    }
+
+    const bankIds = [...new Set([
+      ...(attempt.mode === 'practice' && attempt.questionBank ? [idString(attempt.questionBank)] : []),
+      ...(attempt.questions ?? []).map((question) => idString(question.bankId)).filter(Boolean),
+    ])];
+    if (attempt.mode === 'practice' && !bankIds.length) return false;
+    for (const bankId of bankIds) {
+      let query = QuestionBankModel.findOne({ _id: bankId });
+      if (typeof query?.select === 'function') query = query.select('product');
+      if (typeof query?.lean === 'function') query = query.lean();
+      const bank = await query;
+      if (!bank) return false;
+      if (bank.product && !(await checkProductAccess(bank.product, studentId)).allowed) return false;
+    }
+    return true;
   }
 
   async function loadQuestionBank(id) {
@@ -303,6 +331,7 @@ export function createPracticeController({
       if (typeof existingQuery?.select === 'function') existingQuery.select('+answerKey');
       const existing = await existingQuery;
       if (existing) {
+        if (!await checkAttemptAccess(existing, request.user._id)) return response.status(403).json({ message: 'You need active access to resume this mock test.' });
         const current = await autoSubmitIfExpired(existing, request.user._id);
         return response.status(200).json({ attempt: serializeAttempt(current), resumed: current.status === 'in-progress' });
       }
@@ -362,7 +391,7 @@ export function createPracticeController({
           const query = TestAttemptModel.findOne({ student: request.user._id, mockTest: request.body?.mockTestId, mode: 'mock', status: 'in-progress' });
           if (typeof query?.select === 'function') query.select('+answerKey');
           const active = await query;
-          if (active) return response.status(200).json({ attempt: serializeAttempt(active), resumed: true });
+          if (active && await checkAttemptAccess(active, request.user._id)) return response.status(200).json({ attempt: serializeAttempt(active), resumed: true });
         } catch { /* Return the original safe conflict below. */ }
         return response.status(409).json({ message: 'An attempt for this mock test is already being started.' });
       }
@@ -494,6 +523,7 @@ export function createPracticeController({
         if (!validId(request.params.id)) return response.status(400).json({ message: 'Attempt ID must be valid.' });
         let attempt = await findAttempt(request.params.id, request.user._id);
         if (!attempt) return response.status(404).json({ message: 'This attempt could not be found.' });
+        if (!await checkAttemptAccess(attempt, request.user._id)) return response.status(403).json({ message: 'You need active access to review this attempt.' });
         attempt = await autoSubmitIfExpired(attempt, request.user._id);
         return response.status(200).json({ attempt: serializeAttempt(attempt) });
       } catch (error) { return next(error); }
@@ -504,6 +534,7 @@ export function createPracticeController({
         if (!validId(id) || !validId(questionId)) return response.status(400).json({ message: 'Attempt and question IDs must be valid.' });
         let attempt = await findAttempt(id, request.user._id);
         if (!attempt) return response.status(404).json({ message: 'This attempt could not be found.' });
+        if (!await checkAttemptAccess(attempt, request.user._id)) return response.status(403).json({ message: 'You need active access to change answers in this attempt.' });
         attempt = await autoSubmitIfExpired(attempt, request.user._id);
         if (attempt.status !== 'in-progress') return response.status(409).json({ message: 'This attempt has already been submitted.' });
         const questionIndex = attempt.questions.findIndex((question) => idString(question.questionId) === questionId);
@@ -550,6 +581,7 @@ export function createPracticeController({
         if (!validId(request.params.id)) return response.status(400).json({ message: 'Attempt ID must be valid.' });
         const attempt = await findAttempt(request.params.id, request.user._id);
         if (!attempt) return response.status(404).json({ message: 'This attempt could not be found.' });
+        if (!await checkAttemptAccess(attempt, request.user._id)) return response.status(403).json({ message: 'You need active access to submit this attempt.' });
         const submitted = attempt.status === 'in-progress' ? await scoreAndSubmit(attempt, request.user._id) : attempt;
         return response.status(200).json({ attempt: serializeAttempt(submitted), idempotent: attempt.status !== 'in-progress' });
       } catch (error) { return next(error); }

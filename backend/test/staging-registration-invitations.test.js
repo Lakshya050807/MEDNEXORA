@@ -13,10 +13,11 @@ const [{ createApp }, { default: RegistrationVerificationChallenge }] = await Pr
   import('../src/app.js'),
   import('../src/models/RegistrationVerificationChallenge.js'),
 ]);
+const { createFakeEmailOutboxModel } = await import('./helpers/fakeEmailOutbox.js');
 
 const adminId = '507f1f77bcf86cd799439001';
 const adminPassword = 'staging-admin-test-password';
-const genericRequestMessage = 'If this email address can be used for registration, a verification code will be sent.';
+const genericRequestMessage = 'If this address and request are eligible, a verification code may be sent. This response does not confirm account status or email delivery.';
 const OTP_RE = /\b(\d{6})\b/u;
 let challengeRows;
 let studentRows;
@@ -24,6 +25,7 @@ let currentTime;
 let emailMessages;
 let otp;
 let server;
+let backgroundTasks;
 
 function clone(value) {
   if (value instanceof Date) return new Date(value);
@@ -182,10 +184,12 @@ class UserModel {
 UserModel.admin = { _id: adminId, id: adminId, name: 'Test Admin', email: 'admin@example.test', adminUsername: 'staging-admin', passwordHash: bcrypt.hashSync(adminPassword, 4), role: 'admin', adminSessionVersion: 0 };
 
 async function start({ enabled = true, ttlMinutes = 120 } = {}) {
+  backgroundTasks = [];
   const app = createApp({
     sessionStore: new session.MemoryStore(),
     UserModel,
     RegistrationVerificationChallengeModel: ChallengeModel,
+    EmailOutboxModel: createFakeEmailOutboxModel(),
     PasswordResetRateLimitModel: FakeRegistrationRateLimitModel,
     stagingRestrictedRegistrationEnabled: enabled,
     stagingRegistrationInvitationTtlMinutes: ttlMinutes,
@@ -201,6 +205,7 @@ async function start({ enabled = true, ttlMinutes = 120 } = {}) {
     passwordResetEmailProvider: { async send() { return { sent: true }; } },
     passwordResetNow: () => new Date(currentTime),
     launchConfig: { registrationEnabled: false, paidPurchasesEnabled: false },
+    backgroundTaskScheduler(task) { backgroundTasks.push(task); },
   });
   server = await new Promise((resolve, reject) => {
     const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
@@ -213,6 +218,9 @@ async function request(base, path, { method = 'GET', body, cookie, origin = 'htt
   const headers = { ...(method !== 'GET' ? { Origin: origin } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}) };
   const response = await fetch(base + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const payload = response.status === 204 ? null : await response.json();
+  if (path === '/api/auth/registration/request-otp') {
+    while (backgroundTasks.length) await backgroundTasks.shift()();
+  }
   return { response, payload, cookie: response.headers.get('set-cookie')?.split(';')[0] ?? cookie };
 }
 
@@ -237,6 +245,7 @@ beforeEach(() => {
   currentTime = new Date('2026-11-19T06:00:00.000Z');
   emailMessages = [];
   otp = null;
+  backgroundTasks = [];
 });
 
 afterEach(async () => {

@@ -1,7 +1,23 @@
 export const PRODUCTION_API_ORIGIN = 'https://mednexora-production-f06e.up.railway.app';
-export const PRODUCTION_SITE_ORIGIN = 'https://mednexora-8ams.vercel.app';
+export const PRODUCTION_SITE_ORIGIN = 'https://mednexora.site';
+export const PRODUCTION_VERCEL_PROJECT_ORIGIN = 'https://mednexora-8ams.vercel.app';
 export const STAGING_API_ORIGIN = 'https://mednexora-staging-api-staging.up.railway.app';
 export const STAGING_SITE_ORIGIN = 'https://mednexora-shk6.vercel.app';
+
+export const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self' https://api.razorpay.com https://checkout.razorpay.com",
+  "script-src 'self' https://checkout.razorpay.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com data:",
+  "img-src 'self' data: blob: https:",
+  "connect-src 'self' https://api.razorpay.com https://checkout.razorpay.com",
+  "frame-src 'self' https://api.razorpay.com https://checkout.razorpay.com https://www.youtube-nocookie.com https://player.vimeo.com",
+  "upgrade-insecure-requests",
+].join('; ');
 
 const knownVercelEnvironments = new Set(['production', 'preview', 'development']);
 
@@ -43,7 +59,7 @@ export function resolveVercelApiOrigin({
     if (deploymentEnv !== 'production') {
       throw new Error('Vercel deployment refused: production API access is allowed only for the production deployment target.');
     }
-    const approvedProductionHost = new URL(PRODUCTION_SITE_ORIGIN).host;
+    const approvedProductionHost = new URL(PRODUCTION_VERCEL_PROJECT_ORIGIN).host;
     if (typeof vercelProjectProductionUrl !== 'string'
       || vercelProjectProductionUrl.trim().toLowerCase() !== approvedProductionHost) {
       throw new Error('Vercel production deployment refused: VERCEL_PROJECT_PRODUCTION_URL must match the approved production Vercel project domain.');
@@ -103,6 +119,16 @@ export function createVercelConfig({
       },
     ],
     headers: [
+      {
+        source: '/(.*)',
+        headers: [
+          { key: 'Content-Security-Policy', value: CONTENT_SECURITY_POLICY },
+          { key: 'X-Frame-Options', value: 'DENY' },
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+          { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+          { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
+        ],
+      },
       {
         source: '/api/:path*',
         headers: [{ key: 'x-vercel-enable-rewrite-caching', value: '0' }],

@@ -1,5 +1,6 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { FakeProductAccessRevocationModel, clearFakeProductAccessRevocations } from './helpers/product-access-revocations.js';
 
 process.env.NODE_ENV = 'test';
 process.env.SESSION_SECRET = 'course-test-session-secret-with-at-least-32-bytes';
@@ -82,6 +83,8 @@ const courses = [
 let usersByEmail;
 let usersById;
 let accesses;
+let paidOrders;
+let paidOrderCounter;
 let savedProgress;
 let nextUserId;
 let server;
@@ -137,9 +140,36 @@ class FakeCourseModel {
 
 class FakePurchasedAccessModel {
   static find(filter = {}) { return new FakeQuery(accesses.filter((entry) => String(entry.student) === String(filter.student) && entry.status === filter.status)); }
+  static findOne(filter = {}) {
+    return new FakeQuery(accesses.find((entry) => String(entry.student) === String(filter.student)
+      && String(entry.product) === String(filter.product)
+      && (!filter.status || entry.status === filter.status)) ?? null);
+  }
   static async exists(filter = {}) {
     return accesses.some((entry) => String(entry.student) === String(filter.student) && String(entry.product) === String(filter.product) && entry.status === filter.status) ? { _id: 'active-entitlement' } : null;
   }
+}
+
+class FakeOrderModel {
+  static findOne(filter = {}) {
+    return new FakeQuery(paidOrders.find((order) => String(order._id) === String(filter._id)
+      && String(order.student) === String(filter.student)) ?? null);
+  }
+}
+
+function grantPurchaseAccess(student, product, status = 'paid') {
+  const orderId = `course-order-${paidOrderCounter++}`;
+  const order = {
+    _id: orderId,
+    student,
+    status,
+    paymentVerifiedAt: new Date(),
+    entitledProductIds: [product],
+    items: [{ product }],
+  };
+  paidOrders.push(order);
+  accesses.push({ student, product, order: orderId, source: 'purchase', status: 'active' });
+  return { order, access: accesses.at(-1) };
 }
 
 class FakeCourseProgressModel {
@@ -162,9 +192,12 @@ class FakeCourseProgressModel {
 
 beforeEach(async () => {
   resetRegistrationTestModels();
+  clearFakeProductAccessRevocations();
   usersByEmail = new Map();
   usersById = new Map();
   accesses = [];
+  paidOrders = [];
+  paidOrderCounter = 1;
   savedProgress = [];
   nextUserId = 1;
   const app = createApp({
@@ -176,6 +209,8 @@ beforeEach(async () => {
     CourseModel: FakeCourseModel,
     CourseProgressModel: FakeCourseProgressModel,
     PurchasedAccessModel: FakePurchasedAccessModel,
+    ProductAccessRevocationModel: FakeProductAccessRevocationModel,
+    OrderModel: FakeOrderModel,
     launchConfig: { registrationEnabled: true, paidPurchasesEnabled: false },
   });
   server = await new Promise((resolve) => { const instance = app.listen(0, '127.0.0.1', () => resolve(instance)); });
@@ -254,7 +289,7 @@ test('legacy lessons without topics remain visible while unpublished mapped less
   const hiddenLessonForStudent = await request(`/api/student/courses/${paidCourseId}/lessons/507f1f77bcf86cd799439253/complete`, { method: 'POST', cookie, body: {} });
   assert.equal(hiddenLessonForStudent.response.status, 404);
   const studentId = usersByEmail.get('hidden-curriculum@example.com')._id;
-  accesses.push({ student: studentId, product: paidProductId, status: 'active' });
+  grantPurchaseAccess(studentId, paidProductId);
   const savedHiddenProgress = { student: studentId, course: paidCourseId, completedLessonIds: ['507f1f77bcf86cd799439252'], lastLessonId: '507f1f77bcf86cd799439253' };
   savedProgress.push(savedHiddenProgress);
   const progress = await request(`/api/student/courses/${paidCourseId}/progress`, { cookie });
@@ -311,7 +346,7 @@ test('only configured free previews play publicly; full paid playback requires s
   const denied = await request(`/api/student/courses/${paidCourseId}/lessons/${lessonTwoId}/playback`, { cookie });
   assert.equal(denied.response.status, 403);
   const studentId = usersByEmail.get('course-access@example.com')._id;
-  accesses.push({ student: studentId, product: paidProductId, status: 'active' });
+  grantPurchaseAccess(studentId, paidProductId);
   const authorized = await request(`/api/student/courses/${paidCourseId}/lessons/${lessonTwoId}/playback`, { cookie });
   assert.equal(authorized.response.status, 200);
   assert.equal(authorized.payload.available, false);
@@ -322,7 +357,7 @@ test('only configured free previews play publicly; full paid playback requires s
 test('purchased and free course progress persists, is idempotent, and belongs to the student', async () => {
   const firstCookie = await register('course-progress@example.com');
   const studentId = usersByEmail.get('course-progress@example.com')._id;
-  accesses.push({ student: studentId, product: paidProductId, status: 'active' });
+  grantPurchaseAccess(studentId, paidProductId);
 
   const before = await request(`/api/student/courses/${paidCourseId}/progress`, { cookie: firstCookie });
   assert.equal(before.response.status, 200);
@@ -342,7 +377,7 @@ test('purchased and free course progress persists, is idempotent, and belongs to
   const otherStudentProgress = await request(`/api/student/courses/${paidCourseId}/progress`, { cookie: otherCookie });
   assert.equal(otherStudentProgress.response.status, 403);
   const otherStudentId = usersByEmail.get('another-course-student@example.com')._id;
-  accesses.push({ student: otherStudentId, product: paidProductId, status: 'active' });
+  grantPurchaseAccess(otherStudentId, paidProductId);
   const ownedProgress = await request(`/api/student/courses/${paidCourseId}/progress`, { cookie: otherCookie });
   assert.equal(ownedProgress.response.status, 200);
   assert.equal(ownedProgress.payload.progress.percent, 0);
@@ -353,6 +388,24 @@ test('purchased and free course progress persists, is idempotent, and belongs to
   assert.equal(myCourses.response.status, 200);
   assert.equal(myCourses.payload.items.length, 2);
   assert.equal(myCourses.payload.items.find((item) => item.id === paidCourseId).progress.percent, 50);
+});
+
+test('a fully refunded order cannot authorize course content while its entitlement is stale-active, and free courses remain available', async () => {
+  const cookie = await register('refunded-course@example.com');
+  const studentId = usersByEmail.get('refunded-course@example.com')._id;
+  grantPurchaseAccess(studentId, paidProductId, 'refunded');
+
+  const progress = await request(`/api/student/courses/${paidCourseId}/progress`, { cookie });
+  const playback = await request(`/api/student/courses/${paidCourseId}/lessons/${lessonTwoId}/playback`, { cookie });
+  const completion = await request(`/api/student/courses/${paidCourseId}/lessons/${lessonTwoId}/complete`, { method: 'POST', cookie, body: {} });
+  assert.equal(progress.response.status, 403);
+  assert.equal(playback.response.status, 403);
+  assert.equal(completion.response.status, 403);
+
+  const myCourses = await request('/api/student/courses', { cookie });
+  assert.equal(myCourses.response.status, 200);
+  assert.equal(myCourses.payload.items.some((item) => item.id === paidCourseId), false, 'a stale active entitlement does not list a refunded paid course');
+  assert.equal(myCourses.payload.items.some((item) => item.id === freeCourseId), true, 'published free course access is unaffected');
 });
 
 test('free course video plays only with a valid configured provider ID and public completion saves progress', async () => {

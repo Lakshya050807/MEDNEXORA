@@ -16,6 +16,8 @@ import PaymentWebhookEvent from './models/PaymentWebhookEvent.js';
 import PaymentRefund from './models/PaymentRefund.js';
 import PasswordResetRateLimit from './models/PasswordResetRateLimit.js';
 import RegistrationVerificationChallenge from './models/RegistrationVerificationChallenge.js';
+import EmailDeliveryOutbox from './models/EmailDeliveryOutbox.js';
+import ProductAccessRevocation from './models/ProductAccessRevocation.js';
 import CourseProgress from './models/CourseProgress.js';
 import { env } from './config/env.js';
 import { createAdminRoutes } from './routes/admin.routes.js';
@@ -29,6 +31,7 @@ import { createStudentCourseRoutes } from './routes/student-courses.routes.js';
 import { createPaymentRoutes } from './routes/payment.routes.js';
 import { createRazorpayGateway } from './services/razorpayGateway.js';
 import { createResendEmailProvider } from './services/emailProvider.js';
+import { createEmailDeliveryOutbox } from './services/emailDeliveryOutbox.js';
 
 export function createApp({
   sessionStore,
@@ -48,10 +51,14 @@ export function createApp({
   RefundModel = PaymentRefund,
   PasswordResetRateLimitModel = PasswordResetRateLimit,
   RegistrationVerificationChallengeModel = RegistrationVerificationChallenge,
+  EmailOutboxModel = EmailDeliveryOutbox,
+  ProductAccessRevocationModel = ProductAccessRevocation,
+  emailOutbox,
   CourseProgressModel = CourseProgress,
   privateStorageOrigin = env.privateStorageOrigin,
   privateStorageDir = env.privateStorageDir,
   privateAssetFetch = globalThis.fetch,
+  backgroundTaskScheduler,
   trustProxy = env.trustProxy,
   secureCookies = env.secureCookies,
   launchConfig = {
@@ -83,8 +90,25 @@ export function createApp({
     apiKey: env.resendApiKey,
     from: env.passwordResetFromEmail,
   });
+  const effectiveEmailOutbox = emailOutbox ?? createEmailDeliveryOutbox({
+    OutboxModel: EmailOutboxModel,
+    UserModel,
+    ChallengeModel: RegistrationVerificationChallengeModel,
+    emailProvider: effectiveEmailProvider,
+    passwordResetEmailProvider: passwordResetEmailProvider ?? effectiveEmailProvider,
+    registrationEmailProvider: registrationEmailProvider ?? effectiveEmailProvider,
+    passwordResetOtpPepper,
+    registrationOtpPepper,
+    passwordResetEmailEnabled,
+    registrationEmailVerificationEnabled,
+    registrationEnabled: launchConfig.registrationEnabled === true,
+    stagingRestrictedRegistrationEnabled,
+    now: passwordResetNow ?? registrationNow,
+    scheduler: backgroundTaskScheduler,
+  });
 
   const app = express();
+  app.locals.emailOutbox = effectiveEmailOutbox;
   app.disable('x-powered-by');
   if (trustProxy) app.set('trust proxy', trustProxy);
   app.use((_request, response, next) => {
@@ -138,6 +162,7 @@ export function createApp({
     registrationEmailVerificationEnabled,
     registrationOtpPepper,
     RegistrationVerificationChallengeModel,
+    emailOutbox: effectiveEmailOutbox,
     registrationNow,
     passwordResetEmailEnabled,
     passwordResetOtpPepper,
@@ -145,13 +170,14 @@ export function createApp({
     registrationEmailProvider: effectiveEmailProvider,
     passwordResetRateLimitSecret,
     passwordResetNow,
+    backgroundTaskScheduler,
   }));
-  const practiceModels = { UserModel, QuestionBankModel, MockTestModel, ProductModel, PurchasedAccessModel, TestAttemptModel, ExamModel, SubjectModel, TopicModel, ChapterModel };
+  const practiceModels = { UserModel, QuestionBankModel, MockTestModel, ProductModel, PurchasedAccessModel, OrderModel, ProductAccessRevocationModel, TestAttemptModel, ExamModel, SubjectModel, TopicModel, ChapterModel };
   app.use('/api/student/practice', (_request, response, next) => {
     response.set('Cache-Control', 'no-store');
     next();
   }, studentSession, createPracticeRoutes(practiceModels));
-  const courseModels = { CourseModel, ProductModel, ExamModel, CourseProgressModel, PurchasedAccessModel };
+  const courseModels = { CourseModel, ProductModel, ExamModel, CourseProgressModel, PurchasedAccessModel, OrderModel, ProductAccessRevocationModel };
   app.use('/api/student/courses', (_request, response, next) => {
     response.set('Cache-Control', 'no-store');
     next();
@@ -167,6 +193,7 @@ export function createApp({
     TestAttemptModel,
     PurchasedAccessModel,
     OrderModel,
+    ProductAccessRevocationModel,
     QuestionBankModel,
     MockTestModel,
     SubjectModel,
@@ -185,6 +212,7 @@ export function createApp({
     PurchasedAccessModel,
     WebhookEventModel,
     RefundModel,
+    ProductAccessRevocationModel,
     paymentConfig,
     paidPurchasesEnabled: launchConfig.paidPurchasesEnabled === true,
     gateway: paymentGateway ?? createRazorpayGateway({ keyId: paymentConfig.keyId, keySecret: paymentConfig.keySecret }),
@@ -199,6 +227,7 @@ export function createApp({
     UserModel,
     OrderModel,
     PurchasedAccessModel,
+    ProductAccessRevocationModel,
     RefundModel,
     CourseProgressModel,
     RegistrationVerificationChallengeModel,

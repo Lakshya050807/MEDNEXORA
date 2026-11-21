@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { clearSessionCookie, destroyStudentSession, regenerateStudentSession } from '../utils/session.js';
 import { toStudentProfile } from '../utils/student.js';
 import { hashPassword, normalizeEmail, passwordValidationMessage, validEmail } from '../utils/credentials.js';
+import { passwordResetOtpLifetimeMs } from '../services/emailDeliveryOutbox.js';
 import {
   registrationInvitationDigest,
   registrationInvitationRetentionMs,
@@ -10,12 +11,8 @@ import {
 } from '../services/registrationVerification.js';
 
 const dummyPasswordHash = bcrypt.hashSync(randomBytes(32).toString('hex'), 12);
-const passwordResetOtpLifetimeMs = 10 * 60 * 1000;
-const passwordResetResendCooldownMs = 60 * 1000;
-const passwordResetResendWindowMs = 60 * 60 * 1000;
-const passwordResetMaxSendsPerHour = 5;
 const passwordResetMaxVerificationAttempts = 5;
-const passwordResetRequestMessage = 'If an account exists, an email with password reset instructions will be sent.';
+const passwordResetRequestMessage = 'If this address is eligible, a reset request is being processed. This response does not confirm account status or email delivery.';
 const passwordResetInvalidOtpMessage = 'The code is invalid or expired. Request a new code and try again.';
 const registrationProofInvalidMessage = 'The email verification could not be completed. Request a new code and try again.';
 
@@ -29,77 +26,6 @@ function otpDigest(email, otp, pepper) {
 
 function validOtpPepper(pepper) {
   return typeof pepper === 'string' && Buffer.byteLength(pepper, 'utf8') >= 32;
-}
-
-function resetOtpFields() {
-  return {
-    passwordResetOtpHash: 1,
-    passwordResetOtpExpiresAt: 1,
-    passwordResetOtpStatus: 1,
-    passwordResetOtpActivationConfirmed: 1,
-    passwordResetOtpAttempts: 1,
-  };
-}
-
-async function reserveResetOtp({ UserModel, email, digest, now }) {
-  const cooldownBefore = new Date(now.getTime() - passwordResetResendCooldownMs);
-  const windowBefore = new Date(now.getTime() - passwordResetResendWindowMs);
-  const accountFilter = { email, role: 'student' };
-  const canSendNow = {
-    $or: [
-      { passwordResetOtpLastSentAt: { $exists: false } },
-      { passwordResetOtpLastSentAt: null },
-      { passwordResetOtpLastSentAt: { $lte: cooldownBefore } },
-    ],
-  };
-  const resetFields = {
-    passwordResetOtpHash: digest,
-    passwordResetOtpExpiresAt: new Date(now.getTime() + passwordResetOtpLifetimeMs),
-    passwordResetOtpStatus: 'pending',
-    passwordResetOtpActivationConfirmed: false,
-    passwordResetOtpAttempts: 0,
-    passwordResetOtpLastSentAt: now,
-  };
-
-  // The expired/missing-window branch starts a new hourly counter atomically.
-  const resetWindow = await UserModel.updateOne({
-    ...accountFilter,
-    $and: [canSendNow, {
-      $or: [
-        { passwordResetOtpResendWindowStartedAt: { $exists: false } },
-        { passwordResetOtpResendWindowStartedAt: null },
-        { passwordResetOtpResendWindowStartedAt: { $lte: windowBefore } },
-      ],
-    }],
-  }, {
-    $set: {
-      ...resetFields,
-      passwordResetOtpResendWindowStartedAt: now,
-      passwordResetOtpResendCount: 1,
-    },
-  }, { runValidators: true, writeConcern: { w: 'majority' } });
-  if (updateMatched(resetWindow)) return true;
-
-  // Current-window sends use an atomic conditional increment, shared by every
-  // backend process through MongoDB rather than process-local state.
-  const currentWindow = await UserModel.updateOne({
-    ...accountFilter,
-    $and: [canSendNow, {
-      passwordResetOtpResendWindowStartedAt: { $gt: windowBefore },
-      $or: [
-        { passwordResetOtpResendCount: { $lt: passwordResetMaxSendsPerHour } },
-        { passwordResetOtpResendCount: { $exists: false } },
-      ],
-    }],
-  }, {
-    $set: resetFields,
-    $inc: { passwordResetOtpResendCount: 1 },
-  }, { runValidators: true, writeConcern: { w: 'majority' } });
-  return updateMatched(currentWindow);
-}
-
-function clearOutstandingOtpUpdate() {
-  return { $unset: resetOtpFields() };
 }
 
 function duplicateEmailError(error) {
@@ -118,6 +44,7 @@ export function createAuthController({
   passwordResetEmailEnabled = false,
   passwordResetOtpPepper = '',
   now = () => new Date(),
+  emailOutbox,
 }) {
   return {
     register: async (request, response, next) => {
@@ -278,78 +205,19 @@ export function createAuthController({
       if (!validEmail(email)) return response.status(400).json({ message: 'Please enter a valid email address.' });
 
       const otp = String(randomInt(0, 1_000_000)).padStart(6, '0');
-      const digest = otpDigest(email, otp, passwordResetOtpPepper);
-      const issuedAt = now();
       try {
-        const reserved = await reserveResetOtp({ UserModel, email, digest, now: issuedAt });
-        if (reserved) {
-          try {
-            const delivery = await emailProvider.send({
-              to: email,
-              subject: 'Your MEDNEXORA password reset code',
-              text: `Your password reset code is ${otp}. It expires in 10 minutes. If you did not request this, you can ignore this email.`,
-            });
-            if (delivery?.sent !== true) throw new Error('Email delivery failed.');
-          } catch {
-            // A challenge is pending and therefore unusable even if this best-
-            // effort cleanup fails. Match the digest so a newer request survives.
-            await UserModel.updateOne({ email, role: 'student', passwordResetOtpHash: digest }, {
-              $unset: resetOtpFields(),
-            }).catch(() => {});
-            return response.status(202).json({ message: passwordResetRequestMessage });
-          }
-
-          try {
-            const activated = await UserModel.updateOne({
-              email,
-              role: 'student',
-              passwordResetOtpHash: digest,
-              passwordResetOtpStatus: 'pending',
-              passwordResetOtpExpiresAt: { $gt: issuedAt },
-            }, { $set: { passwordResetOtpStatus: 'active', passwordResetOtpActivationConfirmed: false } }, {
-              runValidators: true,
-              writeConcern: { w: 'majority' },
-            });
-            if (!updateMatched(activated)) {
-              return response.status(202).json({ message: passwordResetRequestMessage });
-            }
-
-            // This marker is written only after the active transition returned
-            // an acknowledged match. If the activation acknowledgement was
-            // lost, the challenge stays unusable even when rollback cannot run.
-            const confirmed = await UserModel.updateOne({
-              email,
-              role: 'student',
-              passwordResetOtpHash: digest,
-              passwordResetOtpStatus: 'active',
-              passwordResetOtpActivationConfirmed: false,
-              passwordResetOtpExpiresAt: { $gt: now() },
-            }, { $set: { passwordResetOtpActivationConfirmed: true } }, {
-              runValidators: true,
-              writeConcern: { w: 'majority' },
-            });
-            if (!updateMatched(confirmed)) {
-              return response.status(202).json({ message: passwordResetRequestMessage });
-            }
-          } catch {
-            // If the activation write committed but its acknowledgement was
-            // lost, this best-effort rollback may fail. The separate marker is
-            // still false, so completion cannot use that challenge.
-            await UserModel.updateOne({
-              email,
-              role: 'student',
-              passwordResetOtpHash: digest,
-              passwordResetOtpStatus: 'active',
-              passwordResetOtpActivationConfirmed: false,
-            }, {
-              $set: { passwordResetOtpStatus: 'pending', passwordResetOtpActivationConfirmed: false },
-            }, { runValidators: true, writeConcern: { w: 'majority' } }).catch(() => {});
-          }
-        }
-        return response.status(202).json({ message: passwordResetRequestMessage });
-      } catch (error) {
-        return next(error);
+        await emailOutbox.enqueue({
+          type: 'password-reset',
+          payload: { email, otp },
+          expiresAt: new Date(now().getTime() + passwordResetOtpLifetimeMs),
+        });
+      } catch {
+        console.error('Password reset email could not be queued.');
+        return response.status(503).json({ message: 'Password reset is temporarily unavailable. Please try again later.' });
       }
+      response.status(202).json({ message: passwordResetRequestMessage });
+      try { emailOutbox.wake(); } catch { /* The durable poller will retry after this process or another instance wakes. */ }
+      return undefined;
     },
 
     completePasswordReset: async (request, response, next) => {
@@ -391,7 +259,16 @@ export function createAuthController({
           $inc: { studentSessionVersion: 1 },
           // Keep send-window counters so a successful reset cannot bypass the
           // per-account cooldown or hourly email cap.
-          $unset: clearOutstandingOtpUpdate().$unset,
+          // Keep the last delivery job identity as a tombstone. A stale worker
+          // must not recreate this already-consumed OTP if terminal job marking
+          // lost its acknowledgement and the worker later retries.
+          $unset: {
+            passwordResetOtpHash: 1,
+            passwordResetOtpExpiresAt: 1,
+            passwordResetOtpStatus: 1,
+            passwordResetOtpActivationConfirmed: 1,
+            passwordResetOtpAttempts: 1,
+          },
         }, { runValidators: true, writeConcern: { w: 'majority' } });
 
         if (updateMatched(completed)) {

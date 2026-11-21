@@ -28,6 +28,7 @@ export function createResendEmailProvider({ apiKey, from, fetchImpl = globalThis
       try {
         response = await fetchImpl(resendEndpoint, {
           method: 'POST',
+          signal: AbortSignal.timeout(15_000),
           headers: {
             Authorization: `Bearer ${configuredApiKey}`,
             'Content-Type': 'application/json',
