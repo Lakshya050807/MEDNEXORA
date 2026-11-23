@@ -2,7 +2,9 @@ export const PRODUCTION_API_ORIGIN = 'https://mednexora-production-f06e.up.railw
 export const PRODUCTION_SITE_ORIGIN = 'https://mednexora.site';
 export const PRODUCTION_VERCEL_PROJECT_ORIGIN = 'https://mednexora-8ams.vercel.app';
 export const STAGING_API_ORIGIN = 'https://mednexora-staging-api-staging.up.railway.app';
+export const STAGING_TUNNEL_API_ORIGIN = 'https://staging-api.mednexora.site';
 export const STAGING_SITE_ORIGIN = 'https://mednexora-shk6.vercel.app';
+const APPROVED_STAGING_API_ORIGINS = new Set([STAGING_API_ORIGIN, STAGING_TUNNEL_API_ORIGIN]);
 
 export const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
@@ -72,8 +74,8 @@ export function resolveVercelApiOrigin({
   }
 
   const stagingOrigin = requireHttpsOrigin(stagingApiOrigin, 'MEDNEXORA_STAGING_API_ORIGIN');
-  if (stagingOrigin !== STAGING_API_ORIGIN) {
-    throw new Error('Vercel staging deployment refused: MEDNEXORA_STAGING_API_ORIGIN must match the approved staging Railway service.');
+  if (!APPROVED_STAGING_API_ORIGINS.has(stagingOrigin)) {
+    throw new Error('Vercel staging deployment refused: MEDNEXORA_STAGING_API_ORIGIN must match an approved staging API origin.');
   }
 
   const siteOrigin = requireHttpsOrigin(publicSiteUrl, 'PUBLIC_SITE_URL');
@@ -86,7 +88,7 @@ export function resolveVercelApiOrigin({
     throw new Error('Vercel staging deployment refused: VERCEL_PROJECT_PRODUCTION_URL must match the approved staging Vercel project domain.');
   }
 
-  return STAGING_API_ORIGIN;
+  return stagingOrigin;
 }
 
 export function createVercelConfig({

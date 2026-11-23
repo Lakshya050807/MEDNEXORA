@@ -11,6 +11,7 @@ import {
   PRODUCTION_VERCEL_PROJECT_ORIGIN,
   CONTENT_SECURITY_POLICY,
   STAGING_API_ORIGIN,
+  STAGING_TUNNEL_API_ORIGIN,
   STAGING_SITE_ORIGIN,
 } from '../vercel-config.mjs';
 
@@ -33,7 +34,7 @@ const productionSettings = {
   vercelProjectProductionUrl: productionProjectHost,
 };
 
-test('staging routes API paths only to the approved Railway staging service', () => {
+test('staging routes API paths to the approved Railway rollback origin', () => {
   const config = createVercelConfig(stagingSettings);
   const [apiRewrite, spaRewrite] = config.rewrites;
 
@@ -51,18 +52,28 @@ test('staging routes API paths only to the approved Railway staging service', ()
   assert.equal(apiRewrite.destination.includes('mednexora-production-f06e'), false);
 });
 
+test('staging routes API paths to the approved Cloudflare Tunnel origin', () => {
+  const config = createVercelConfig({
+    ...stagingSettings,
+    stagingApiOrigin: STAGING_TUNNEL_API_ORIGIN,
+  });
+
+  assert.equal(config.rewrites[0].destination, STAGING_TUNNEL_API_ORIGIN + '/api/:path*');
+});
+
 test('production remains pinned to its approved backend and ignores staging values', () => {
   const config = createVercelConfig({
     ...productionSettings,
-    stagingApiOrigin: STAGING_API_ORIGIN,
+    stagingApiOrigin: STAGING_TUNNEL_API_ORIGIN,
   });
 
   assert.equal(config.rewrites[0].destination, `${PRODUCTION_API_ORIGIN}/api/:path*`);
   assert.equal(config.rewrites[0].destination.includes('mednexora-staging-api-staging'), false);
+  assert.equal(config.rewrites[0].destination.includes('staging-api.mednexora.site'), false);
 });
 
 test('staging refuses missing, production, or unapproved API origins', () => {
-  for (const stagingApiOrigin of [undefined, PRODUCTION_API_ORIGIN, 'https://other-service.up.railway.app']) {
+  for (const stagingApiOrigin of [undefined, PRODUCTION_API_ORIGIN, 'https://other-service.up.railway.app', 'https://staging-api.attacker.example']) {
     assert.throws(() => createVercelConfig({ ...stagingSettings, stagingApiOrigin }));
   }
 });
