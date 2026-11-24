@@ -11,7 +11,6 @@ import {
   PRODUCTION_VERCEL_PROJECT_ORIGIN,
   CONTENT_SECURITY_POLICY,
   STAGING_API_ORIGIN,
-  STAGING_TUNNEL_API_ORIGIN,
   STAGING_SITE_ORIGIN,
 } from '../vercel-config.mjs';
 
@@ -34,7 +33,7 @@ const productionSettings = {
   vercelProjectProductionUrl: productionProjectHost,
 };
 
-test('staging routes API paths to the approved Railway rollback origin', () => {
+test('staging routes API paths to the approved direct Railway origin', () => {
   const config = createVercelConfig(stagingSettings);
   const [apiRewrite, spaRewrite] = config.rewrites;
 
@@ -52,28 +51,36 @@ test('staging routes API paths to the approved Railway rollback origin', () => {
   assert.equal(apiRewrite.destination.includes('mednexora-production-f06e'), false);
 });
 
-test('staging routes API paths to the approved Cloudflare Tunnel origin', () => {
-  const config = createVercelConfig({
+test('staging rejects the Cloudflare Tunnel hostname as an API origin', () => {
+  assert.throws(() => createVercelConfig({
     ...stagingSettings,
-    stagingApiOrigin: STAGING_TUNNEL_API_ORIGIN,
-  });
-
-  assert.equal(config.rewrites[0].destination, STAGING_TUNNEL_API_ORIGIN + '/api/:path*');
+    stagingApiOrigin: 'https://staging-api.mednexora.site',
+  }), /approved staging API origin/u);
 });
 
-test('production remains pinned to its approved backend and ignores staging values', () => {
-  const config = createVercelConfig({
-    ...productionSettings,
-    stagingApiOrigin: STAGING_TUNNEL_API_ORIGIN,
-  });
+test('production remains pinned to its approved backend', () => {
+  const config = createVercelConfig(productionSettings);
 
   assert.equal(config.rewrites[0].destination, `${PRODUCTION_API_ORIGIN}/api/:path*`);
   assert.equal(config.rewrites[0].destination.includes('mednexora-staging-api-staging'), false);
   assert.equal(config.rewrites[0].destination.includes('staging-api.mednexora.site'), false);
 });
 
+test('production refuses a staging Railway origin in the staging-only variable', () => {
+  assert.throws(() => createVercelConfig({
+    ...productionSettings,
+    stagingApiOrigin: STAGING_API_ORIGIN,
+  }), /MEDNEXORA_STAGING_API_ORIGIN must not be set for production/u);
+});
+
 test('staging refuses missing, production, or unapproved API origins', () => {
-  for (const stagingApiOrigin of [undefined, PRODUCTION_API_ORIGIN, 'https://other-service.up.railway.app', 'https://staging-api.attacker.example']) {
+  for (const stagingApiOrigin of [
+    undefined,
+    PRODUCTION_API_ORIGIN,
+    'https://staging-api.mednexora.site',
+    'https://other-service.up.railway.app',
+    'https://staging-api.attacker.example',
+  ]) {
     assert.throws(() => createVercelConfig({ ...stagingSettings, stagingApiOrigin }));
   }
 });
