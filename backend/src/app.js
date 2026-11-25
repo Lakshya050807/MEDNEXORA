@@ -26,6 +26,7 @@ import { createCourseRoutes } from './routes/course.routes.js';
 import { createStudentCourseRoutes } from './routes/student-courses.routes.js';
 import { createPaymentRoutes } from './routes/payment.routes.js';
 import { createRazorpayGateway } from './services/razorpayGateway.js';
+import { createPasswordResetEmailSender } from './services/passwordResetEmailSender.js';
 
 export function createApp({
   sessionStore,
@@ -53,6 +54,8 @@ export function createApp({
     registrationEnabled: env.publicRegistrationEnabled,
     paidPurchasesEnabled: env.paidPurchasesEnabled,
   },
+  passwordResetEmailSender = createPasswordResetEmailSender(env.passwordResetEmail),
+  passwordResetEmailEnabled = env.passwordResetEmailEnabled,
   paymentConfig = {
     keyId: env.razorpayKeyId,
     keySecret: env.razorpayKeySecret,
@@ -109,7 +112,13 @@ export function createApp({
   app.use('/api/auth', (_request, response, next) => {
     response.set('Cache-Control', 'no-store');
     next();
-  }, studentSession, createAuthRoutes({ UserModel, registrationEnabled: launchConfig.registrationEnabled === true }));
+  }, studentSession, createAuthRoutes({
+    UserModel,
+    registrationEnabled: launchConfig.registrationEnabled === true,
+    passwordResetEmailSender,
+    passwordResetEmailEnabled,
+    appOrigin: env.appOrigin,
+  }));
   const practiceModels = { UserModel, QuestionBankModel, MockTestModel, ProductModel, PurchasedAccessModel, TestAttemptModel, ExamModel, SubjectModel, TopicModel, ChapterModel };
   app.use('/api/student/practice', (_request, response, next) => {
     response.set('Cache-Control', 'no-store');

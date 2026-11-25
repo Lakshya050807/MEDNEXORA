@@ -5,6 +5,7 @@ import { applyPageMetadata } from '../utils/pageMetadata.js';
 const HomePage = lazy(() => import('../pages/HomePage.jsx'));
 const LoginPage = lazy(() => import('../pages/LoginPage.jsx'));
 const RegisterPage = lazy(() => import('../pages/RegisterPage.jsx'));
+const PasswordRecoveryPage = lazy(() => import('../pages/PasswordRecoveryPage.jsx'));
 const InformationPage = lazy(() => import('../pages/InformationPage.jsx'));
 const AdminDashboardPage = lazy(() => import('../pages/AdminDashboardPage.jsx'));
 const AdminLoginPage = lazy(() => import('../pages/AdminLoginPage.jsx'));
@@ -34,6 +35,8 @@ export default function AppRoutes() {
 
   if (path === '/login') return withSuspense(<LoginPage />);
   if (path === '/register') return withSuspense(<RegisterPage />);
+  if (path === '/forgot-password') return withSuspense(<PasswordRecoveryPage mode="forgot" />);
+  if (path === '/reset-password') return withSuspense(<PasswordRecoveryPage mode="reset" />);
   if (path === '/about') return withSuspense(<InformationPage page="about" />);
   if (path === '/contact') return withSuspense(<InformationPage page="contact" />);
   if (path === '/faq') return withSuspense(<InformationPage page="faq" />);

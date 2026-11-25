@@ -692,6 +692,8 @@ h1, h2, h3 { color: var(--navy); font-family: Manrope, Inter, 'Segoe UI', Arial,
 .auth-card h1 { margin: 0 0 8px; color: var(--navy); font-size: clamp(26px, 5vw, 32px); letter-spacing: -1px; line-height: 1.2; }
 .auth-description { margin: 0 0 23px; color: var(--muted); font-size: 11px; line-height: 1.7; }
 .auth-form { display: grid; gap: 15px; }
+.auth-secondary-link { margin: -4px 0 0; text-align: right; font-size: 13px; }
+.auth-secondary-link a { color: var(--teal-dark); text-decoration: underline; text-underline-offset: 3px; }
 .auth-field { display: grid; gap: 7px; color: #34485e; font-size: 10px; font-weight: 700; }
 .auth-field input { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid #dbe3e9; border-radius: 7px; outline: none; color: var(--navy); background: #fff; font: inherit; font-size: 11px; transition: border-color .18s ease, box-shadow .18s ease; }
 .auth-field input:focus { border-color: #54a8a3; box-shadow: 0 0 0 3px rgba(22, 137, 132, .11); }

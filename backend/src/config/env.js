@@ -34,6 +34,12 @@ const launchApprovals = Object.fromEntries(launchApprovalNames.map((name) => [
 const launchApprovalsComplete = Object.values(launchApprovals).every(Boolean);
 const registrationRequested = readBooleanSetting('PUBLIC_BETA_REGISTRATION_ENABLED', !productionRuntime);
 const paidPurchasesRequested = readBooleanSetting('PUBLIC_BETA_PAID_PURCHASES_ENABLED', !productionRuntime);
+const passwordResetEmailEnabled = readBooleanSetting('PASSWORD_RESET_EMAIL_ENABLED', false);
+const resendApiKey = process.env.RESEND_API_KEY?.trim() ?? '';
+const resendApiKeyValid = resendApiKey.length > 0 && resendApiKey.length <= 512 && /^[!-~]+$/u.test(resendApiKey);
+if (passwordResetEmailEnabled && !resendApiKeyValid) {
+  throw new Error('Configure a valid RESEND_API_KEY before enabling PASSWORD_RESET_EMAIL_ENABLED.');
+}
 const configuredRazorpayMode = process.env.RAZORPAY_MODE;
 const razorpayMode = configuredRazorpayMode ?? 'test';
 const razorpayKeyId = process.env.RAZORPAY_KEY_ID ?? '';
@@ -191,6 +197,11 @@ export const env = Object.freeze({
   appEnv,
   publicRegistrationEnabled: registrationRequested && (!productionRuntime || launchApprovalsComplete),
   paidPurchasesEnabled: paidPurchasesRequested && (!productionRuntime || launchApprovalsComplete),
+  passwordResetEmailEnabled,
+  passwordResetEmail: Object.freeze({
+    apiKey: resendApiKeyValid ? resendApiKey : '',
+    configured: resendApiKeyValid,
+  }),
   mongoUri: configuredMongoUri || 'mongodb://127.0.0.1:27017/nursing_education',
   sessionSecret,
   sessionMaxAgeMs: sessionMaxAgeDays * 24 * 60 * 60 * 1000,

@@ -32,6 +32,11 @@ const userSchema = new mongoose.Schema({
     required: true,
     select: false,
   },
+  studentSessionVersion: { type: Number, min: 0, default: 0, select: false },
+  passwordResetTokenHash: { type: String, select: false, index: true },
+  passwordResetExpiresAt: { type: Date, select: false },
+  passwordResetStatus: { type: String, enum: ['pending', 'active'], select: false },
+  passwordResetActivationConfirmed: { type: Boolean, select: false },
   role: {
     type: String,
     enum: ['student', 'admin'],
