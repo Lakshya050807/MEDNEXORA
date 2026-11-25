@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { assertPrivateStorageMount as assertPrivateStorageMountDefault } from './services/privateStorageMount.js';
 
 function waitForListening(server) {
   if (server.listening) return Promise.resolve();
@@ -68,6 +69,7 @@ export async function startApiServer({
   models,
   ensurePrimaryExamIndex,
   ensurePurchaseReservationBackfill,
+  assertPrivateStorageMount = assertPrivateStorageMountDefault,
   onListening,
 }) {
   let sessionStore;
@@ -91,6 +93,7 @@ export async function startApiServer({
   };
 
   try {
+    await assertPrivateStorageMount({ nodeEnv: envConfig.nodeEnv, directory: envConfig.privateStorageDir });
     await mongooseClient.connect(envConfig.mongoUri);
     await ensurePrimaryExamIndex(ExamModel);
     await ensurePurchaseReservationBackfill(OrderModel);

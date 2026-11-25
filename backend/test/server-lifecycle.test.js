@@ -9,6 +9,8 @@ function createHarness({
   initError,
   workerStartError,
   workerStopBehavior,
+  storageMountError,
+  nodeEnv = 'test',
   delayServerClose = false,
   onListening,
 } = {}) {
@@ -94,7 +96,7 @@ function createHarness({
 
   const start = () => startApiServer({
     mongooseClient,
-    envConfig: { mongoUri: 'mongodb://test-only', sessionMaxAgeMs: 60_000, port: 8080 },
+    envConfig: { mongoUri: 'mongodb://test-only', sessionMaxAgeMs: 60_000, port: 8080, nodeEnv, privateStorageDir: '/tmp/test-private-files' },
     MongoStoreFactory: mongoStoreFactory,
     createApp,
     ExamModel: { id: 'Exam' },
@@ -102,6 +104,10 @@ function createHarness({
     models,
     async ensurePrimaryExamIndex() { events.push('primary-index-check'); },
     async ensurePurchaseReservationBackfill() { events.push('reservation-check'); },
+    async assertPrivateStorageMount() {
+      events.push('storage-mount-check');
+      if (storageMountError) throw storageMountError;
+    },
     onListening: onListening ?? (() => {
       events.push('post-listen-setup');
       return () => events.push('post-listen-cleanup');
@@ -116,11 +122,24 @@ test('worker starts only after the HTTP server emits listening and normal startu
   const runtime = await start();
 
   assert.equal(runtime.server, server);
+  assert.ok(events.indexOf('storage-mount-check') < events.findIndex((event) => event.startsWith('db-connect:')));
   assert.ok(events.indexOf('session-store-ready') < events.indexOf('listen:8080'));
   assert.ok(events.indexOf('listening') < events.indexOf('post-listen-setup'));
   assert.ok(events.indexOf('post-listen-setup') < events.indexOf('worker-start'));
   assert.equal(events.includes('db-disconnect'), false);
   server.close(() => {});
+});
+
+test('a failed production storage-mount check stops startup before MongoDB connects', async () => {
+  const failure = new Error('simulated missing private storage mount');
+  const { events, start } = createHarness({ storageMountError: failure, nodeEnv: 'production' });
+
+  await assert.rejects(start(), (error) => error === failure);
+  assert.equal(events.includes('storage-mount-check'), true);
+  assert.equal(events.some((event) => event.startsWith('db-connect:')), false);
+  assert.equal(events.some((event) => event.startsWith('model-init-')), false);
+  assert.equal(events.includes('worker-start'), false);
+  assert.ok(events.includes('db-disconnect'));
 });
 
 test('a server startup error prevents worker start and closes initialized resources', async () => {
