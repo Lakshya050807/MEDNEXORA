@@ -53,8 +53,8 @@ const courses = [
     _id: paidCourseId, product: products[0], exam, subjects: [subject, { _id: '507f1f77bcf86cd799439242', name: 'Unpublished subject', exam: examId, publicationStatus: 'draft' }], courseType: 'video-course', category: 'Government Competitive Exam Preparation', targetAudience: 'Configured test audience.', durationMinutes: 90, lessonCount: 2,
     outline: ['Original configured course outline'], publicationStatus: 'published', createdAt: new Date('2026-10-01T00:00:00Z'), updatedAt: new Date('2026-10-02T00:00:00Z'),
     modules: [{ _id: '507f1f77bcf86cd799439221', title: 'Biology foundations', subject, chapter: { _id: '507f1f77bcf86cd799439231', name: 'Published foundations', slug: 'published-foundations', exam: examId, subject, publicationStatus: 'published' }, sortOrder: 0, lessons: [
-      { _id: lessonOneId, title: 'Free example preview', description: 'Sample lesson.', durationMinutes: 10, videoProvider: 'youtube', videoAssetId: 'dQw4w9WgXcQ', isPreview: true, sortOrder: 0, topic: { _id: '507f1f77bcf86cd799439251', name: 'Published topic', slug: 'published-topic', exam: examId, subject: subjectId, chapter: '507f1f77bcf86cd799439231', publicationStatus: 'published' } },
-      { _id: lessonTwoId, title: 'Paid lesson', description: '', durationMinutes: 20, videoProvider: 'youtube', videoAssetId: 'jNQXAC9IVRw', isPreview: false, sortOrder: 1 },
+      { _id: lessonOneId, title: 'Free example preview', description: 'Sample lesson.', contentText: 'Only students with course access can see this complete lesson text.', durationMinutes: 10, videoProvider: 'youtube', videoAssetId: 'dQw4w9WgXcQ', isPreview: true, sortOrder: 0, topic: { _id: '507f1f77bcf86cd799439251', name: 'Published topic', slug: 'published-topic', exam: examId, subject: subjectId, chapter: '507f1f77bcf86cd799439231', publicationStatus: 'published' } },
+      { _id: lessonTwoId, title: 'Paid lesson', description: '', contentText: 'Private paid lesson text.', durationMinutes: 20, videoProvider: 'youtube', videoAssetId: 'jNQXAC9IVRw', isPreview: false, sortOrder: 1 },
       { _id: '507f1f77bcf86cd799439252', title: 'Draft lesson', publicationStatus: 'draft', sortOrder: 2 },
       { _id: '507f1f77bcf86cd799439253', title: 'Lesson under unpublished topic', publicationStatus: 'published', sortOrder: 3, topic: { _id: '507f1f77bcf86cd799439254', name: 'Private topic', slug: 'private-topic', exam: examId, subject: subjectId, chapter: '507f1f77bcf86cd799439231', publicationStatus: 'draft' } },
     ] },
@@ -65,7 +65,7 @@ const courses = [
     _id: freeCourseId, product: products[1], exam, subjects: [subject], courseType: 'crash-course', durationMinutes: 30, lessonCount: 1,
     outline: [], publicationStatus: 'published', createdAt: new Date('2026-10-03T00:00:00Z'), updatedAt: new Date('2026-10-03T00:00:00Z'),
     modules: [{ _id: '507f1f77bcf86cd799439222', title: 'Chemistry sample module', subject, sortOrder: 0, lessons: [
-      { _id: freeLessonId, title: 'Free lesson', description: '', durationMinutes: 30, videoProvider: 'vimeo', videoAssetId: '76979871', isPreview: false, sortOrder: 0 },
+      { _id: freeLessonId, title: 'Free lesson', description: '', contentText: 'A free beta lesson configured by an administrator.', durationMinutes: 30, videoProvider: 'vimeo', videoAssetId: '76979871', isPreview: false, sortOrder: 0 },
     ] }],
   },
   {
@@ -136,6 +136,17 @@ class FakeCourseModel {
 
 class FakePurchasedAccessModel {
   static find(filter = {}) { return new FakeQuery(accesses.filter((entry) => String(entry.student) === String(filter.student) && entry.status === filter.status)); }
+  static findOne(filter = {}) { return new FakeQuery(accesses.find((entry) => String(entry.student) === String(filter.student) && String(entry.product) === String(filter.product)) ?? null); }
+  static async create(entry) {
+    if (accesses.some((row) => String(row.student) === String(entry.student) && String(row.product) === String(entry.product))) {
+      const conflict = new Error('Duplicate student/product access.');
+      conflict.code = 11000;
+      throw conflict;
+    }
+    const row = { ...entry, createdAt: new Date() };
+    accesses.push(row);
+    return row;
+  }
   static async exists(filter = {}) {
     return accesses.some((entry) => String(entry.student) === String(filter.student) && String(entry.product) === String(filter.product) && entry.status === filter.status) ? { _id: 'active-entitlement' } : null;
   }
@@ -173,6 +184,7 @@ beforeEach(async () => {
     CourseModel: FakeCourseModel,
     CourseProgressModel: FakeCourseProgressModel,
     PurchasedAccessModel: FakePurchasedAccessModel,
+    launchConfig: { registrationEnabled: true, paidPurchasesEnabled: false },
   });
   server = await new Promise((resolve) => { const instance = app.listen(0, '127.0.0.1', () => resolve(instance)); });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -219,6 +231,7 @@ test('public courses list and detail return published course data without privat
   assert.equal(serialized.includes('dQw4w9WgXcQ'), false);
   assert.equal(serialized.includes('private://paid.pdf'), false);
   assert.equal(serialized.includes('videoAssetId'), false);
+  assert.equal(serialized.includes('Only students with course access can see this complete lesson text.'), false);
   const priceAscending = await request('/api/courses?sort=price-asc&limit=1');
   assert.equal(priceAscending.payload.items[0].id, freeCourseId);
   assert.equal(priceAscending.payload.pagination.total, 2);
@@ -236,6 +249,8 @@ test('lesson topic mapping is optional and embedded lesson IDs remain enabled fo
   const legacyLesson = legacyCourse.modules[0].lessons[0];
   assert.ok(legacyLesson._id);
   assert.equal(legacyLesson.topic, undefined);
+  assert.equal(legacyLesson.contentText, '');
+  assert.equal(Course.schema.path('modules').schema.path('lessons').schema.path('contentText').options.maxlength, 30000);
 });
 
 test('legacy lessons without topics remain visible while unpublished mapped lessons cannot be opened', async () => {
@@ -317,6 +332,8 @@ test('only configured free previews play publicly; full paid playback requires s
 
 test('purchased and free course progress persists, is idempotent, and belongs to the student', async () => {
   const firstCookie = await register('course-progress@example.com');
+  const freeEnrollment = await request(`/api/student/courses/${freeCourseId}/enroll`, { method: 'POST', cookie: firstCookie, body: {} });
+  assert.equal(freeEnrollment.response.status, 201);
   const studentId = usersByEmail.get('course-progress@example.com')._id;
   accesses.push({ student: studentId, product: paidProductId, status: 'active' });
 
@@ -353,6 +370,8 @@ test('purchased and free course progress persists, is idempotent, and belongs to
 
 test('free course video plays only with a valid configured provider ID and public completion saves progress', async () => {
   const cookie = await register('free-course@example.com');
+  const enrollment = await request(`/api/student/courses/${freeCourseId}/enroll`, { method: 'POST', cookie, body: {} });
+  assert.equal(enrollment.response.status, 201);
   const playback = await request(`/api/student/courses/${freeCourseId}/lessons/${freeLessonId}/playback`, { cookie });
   assert.equal(playback.response.status, 200);
   assert.equal(playback.payload.available, true);
@@ -362,4 +381,73 @@ test('free course video plays only with a valid configured provider ID and publi
   assert.equal(saved.payload.progress.percent, 100);
   const savedSchema = CourseProgress.schema;
   assert.ok(savedSchema.indexes().some(([keys, options]) => keys.student === 1 && keys.course === 1 && options.unique === true));
+});
+
+test('free course enrollment is authenticated, idempotent, concurrent-safe, and required for My Courses access', async () => {
+  const launchStatus = await request('/api/launch/status');
+  assert.equal(launchStatus.response.status, 200);
+  assert.equal(launchStatus.payload.paidPurchasesEnabled, false, 'test app keeps the new paid checkout gate closed');
+  const anonymous = await request(`/api/student/courses/${freeCourseId}/enroll`, { method: 'POST', body: {} });
+  assert.equal(anonymous.response.status, 401);
+  const cookie = await register('free-enrollment@example.com');
+  const before = await request('/api/student/courses', { cookie });
+  assert.equal(before.payload.items.some((item) => item.id === freeCourseId), false);
+  const lessonBeforeEnrollment = await request(`/api/student/courses/${freeCourseId}/lessons/${freeLessonId}/content`, { cookie });
+  assert.equal(lessonBeforeEnrollment.response.status, 403);
+  const progressBeforeEnrollment = await request(`/api/student/courses/${freeCourseId}/progress`, { cookie });
+  assert.equal(progressBeforeEnrollment.response.status, 403);
+
+  const results = await Promise.all([
+    request(`/api/student/courses/${freeCourseId}/enroll`, { method: 'POST', cookie, body: {} }),
+    request(`/api/student/courses/${freeCourseId}/enroll`, { method: 'POST', cookie, body: {} }),
+  ]);
+  assert.deepEqual(results.map((item) => item.response.status).sort(), [200, 201]);
+  const studentId = usersByEmail.get('free-enrollment@example.com')._id;
+  assert.equal(accesses.filter((entry) => String(entry.student) === studentId && String(entry.product) === freeProductId).length, 1);
+  const access = accesses.find((entry) => String(entry.student) === studentId && String(entry.product) === freeProductId);
+  assert.equal(access.source, 'free');
+  assert.equal(access.status, 'active');
+
+  const after = await request('/api/student/courses', { cookie });
+  assert.equal(after.payload.items.some((item) => item.id === freeCourseId), true);
+  assert.equal(after.payload.items.find((item) => item.id === freeCourseId).accessType, 'free');
+  const content = await request(`/api/student/courses/${freeCourseId}/lessons/${freeLessonId}/content`, { cookie });
+  assert.equal(content.response.status, 200);
+  assert.equal(content.response.headers.get('cache-control'), 'private, no-store');
+  assert.equal(content.payload.lesson.contentText, 'A free beta lesson configured by an administrator.');
+});
+
+test('paid courses cannot use free enrollment and a student cannot read another course lesson', async () => {
+  const cookie = await register('course-content-owner@example.com');
+  const paidEnrollment = await request(`/api/student/courses/${paidCourseId}/enroll`, { method: 'POST', cookie, body: {} });
+  assert.equal(paidEnrollment.response.status, 409);
+  const denied = await request(`/api/student/courses/${paidCourseId}/lessons/${lessonTwoId}/content`, { cookie });
+  assert.equal(denied.response.status, 403);
+  assert.equal(accesses.some((entry) => String(entry.student) === usersByEmail.get('course-content-owner@example.com')._id && String(entry.product) === paidProductId), false);
+
+  const studentId = usersByEmail.get('course-content-owner@example.com')._id;
+  accesses.push({ student: studentId, product: paidProductId, status: 'active' });
+  const authorized = await request(`/api/student/courses/${paidCourseId}/lessons/${lessonTwoId}/content`, { cookie });
+  assert.equal(authorized.response.status, 200);
+  assert.equal(authorized.payload.lesson.contentText, 'Private paid lesson text.');
+
+  const otherCookie = await register('course-content-other@example.com');
+  const otherStudent = usersByEmail.get('course-content-other@example.com')._id;
+  const crossStudent = await request(`/api/student/courses/${paidCourseId}/lessons/${lessonTwoId}/content`, { cookie: otherCookie });
+  assert.equal(crossStudent.response.status, 403);
+  assert.ok(!accesses.some((entry) => String(entry.student) === otherStudent && String(entry.product) === paidProductId));
+});
+
+test('revoked free course enrollment cannot be silently recreated', async () => {
+  const cookie = await register('revoked-course-access@example.com');
+  const studentId = usersByEmail.get('revoked-course-access@example.com')._id;
+  accesses.push({ student: studentId, product: freeProductId, source: 'free', status: 'revoked' });
+  const result = await request(`/api/student/courses/${freeCourseId}/enroll`, { method: 'POST', cookie, body: {} });
+  assert.equal(result.response.status, 409);
+  assert.equal(accesses.filter((entry) => String(entry.student) === studentId && String(entry.product) === freeProductId).length, 1);
+});
+
+test('only configured lessons can be previewed publicly, including lessons in a free course', async () => {
+  const denied = await request(`/api/courses/${freeCourseId}/lessons/${freeLessonId}/preview`);
+  assert.equal(denied.response.status, 403);
 });

@@ -4,7 +4,7 @@ import SiteHeader from '../components/SiteHeader.jsx';
 
 const informationPages = {
   about: {
-    eyebrow: 'OWNER CONFIRMATION REQUIRED',
+    eyebrow: 'DRAFT — OWNER CONFIRMATION REQUIRED',
     title: 'About MEDNEXORA',
     summary: 'The owner launch checklist does not yet include the business and service answers needed to finalize this page.',
     notice: 'This page is not finalized. Confirm the legal operator and brand relationship, accurate service and audience description, and any claims or affiliations before publication.',
@@ -15,7 +15,7 @@ const informationPages = {
     ],
   },
   contact: {
-    eyebrow: 'OWNER CONFIRMATION REQUIRED',
+    eyebrow: 'DRAFT — OWNER CONFIRMATION REQUIRED',
     title: 'How can we help?',
     summary: 'The owner launch checklist does not contain a confirmed support contact or public business address.',
     notice: 'Do not use this page as a support channel until the owner provides a monitored contact method.',
@@ -25,7 +25,7 @@ const informationPages = {
     ],
   },
   faq: {
-    eyebrow: 'OWNER CONFIRMATION REQUIRED',
+    eyebrow: 'DRAFT — OWNER CONFIRMATION REQUIRED',
     title: 'Frequently asked questions.',
     summary: 'Answers are awaiting owner confirmation so this page accurately reflects the service, its policies, and current operation.',
     notice: 'The checklist contains topics to answer, but no approved answers. Do not treat the prompts below as service terms.',
@@ -90,7 +90,13 @@ export default function InformationPage({ page = 'about' }) {
             <h1>{content.title}</h1>
             <p>{content.summary}</p>
           </header>
-          {content.notice && <aside className={`information-notice${needsOwnerConfirmation ? ' is-draft' : ''}`} role="note"><Icon name={needsOwnerConfirmation ? 'file' : 'shield'} size={19} /><p>{content.notice}</p></aside>}
+          {content.notice && <aside className={`information-notice${needsOwnerConfirmation ? ' is-draft' : ''}`} role="note" aria-label="Page approval status">
+            <Icon name="file" size={19} />
+            <div>
+              <h2 className="information-draft-heading">DRAFT — NOT APPROVED FOR PUBLIC USE</h2>
+              <p>{content.notice}</p>
+            </div>
+          </aside>}
           {content.faqs ? (
             <section className="information-faq-list" aria-label="Frequently asked questions">
               {content.faqs.map((item) => <details key={item.question}><summary>{item.question}<span aria-hidden="true">+</span></summary><p>{item.answer}</p></details>)}

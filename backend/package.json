@@ -13,6 +13,7 @@
     "admin:promote": "node scripts/promote-admin.js",
     "exam:configure-primary": "node scripts/configure-primary-exam.js",
     "course:setup-flagship": "node scripts/create-flagship-course.js",
+    "catalogue:audit": "node scripts/audit-production-catalogue.js",
     "payments:reservations:backfill": "node scripts/backfill-purchase-reservations.js",
     "db:study-material-text-index": "node scripts/migrate-study-material-text-index.js",
     "test": "node --test"

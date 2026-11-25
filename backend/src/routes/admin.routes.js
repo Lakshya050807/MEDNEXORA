@@ -49,6 +49,7 @@ export function createAdminRoutes({ UserModel, OrderModel, RefundModel, privateS
   router.delete('/products/:id', verifyOrigin, controller.admin.deleteProduct);
   router.post('/courses', verifyOrigin, controller.admin.createCourse);
   router.patch('/courses/:id', verifyOrigin, controller.admin.updateCourse);
+  router.delete('/courses/:courseId/lessons/:lessonId', verifyOrigin, adminController.deleteCourseLesson);
   router.post('/question-banks', verifyOrigin, controller.admin.createQuestionBank);
   router.patch('/question-banks/:id', verifyOrigin, controller.admin.updateQuestionBank);
   router.post('/mock-tests', verifyOrigin, controller.admin.createMockTest);

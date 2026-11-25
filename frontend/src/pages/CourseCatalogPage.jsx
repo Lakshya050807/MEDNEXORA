@@ -3,23 +3,25 @@ import Icon from '../components/Icon.jsx';
 import SiteHeader from '../components/SiteHeader.jsx';
 import SiteFooter from '../components/SiteFooter.jsx';
 import { formatPricePaise } from '../data/catalog.js';
+import { useAuth } from '../context/AuthContext.jsx';
 import { courseApi } from '../services/courseApi.js';
 
-function CourseCard({ course }) {
+function CourseCard({ course, enrolled = false }) {
   const product = course.product ?? {};
+  const coursePath = `/courses/${encodeURIComponent(course.id)}`;
   return (
     <article className="course-catalog-card">
-      <a className="course-card-art" href={`/courses/${encodeURIComponent(course.id)}`}>
+      <a className="course-card-art" href={coursePath}>
         {product.thumbnailUrl ? <img src={product.thumbnailUrl} alt="" loading="lazy" /> : <span className="course-card-placeholder"><Icon name="play" size={30} /></span>}
         <span className="course-type-chip">{course.courseType === 'crash-course' ? 'Crash course' : 'Recorded course'}</span>
       </a>
       <div className="course-card-copy">
         <p className="eyebrow">{course.category || course.exam?.name || 'Government Competitive Exam Preparation'}</p>
-        <h2><a href={`/courses/${encodeURIComponent(course.id)}`}>{product.title || 'Entrance preparation course'}</a></h2>
+        <h2><a href={coursePath}>{product.title || 'Entrance preparation course'}</a></h2>
         <p>{product.description || 'A structured course with lessons organized by module.'}</p>
         <div className="course-card-meta">{course.lessonCount > 0 ? <span><Icon name="play" size={15} /> {course.lessonCount} lessons</span> : <span>Course outline in progress</span>}{course.durationMinutes && <span>{course.durationMinutes} min</span>}</div>
         {course.subjects?.length > 0 && <div className="course-subject-tags">{course.subjects.slice(0, 3).map((subject) => <span key={subject.id}>{subject.name || 'Subject'}</span>)}</div>}
-        <div className="course-card-footer"><strong>{product.isFree ? 'Free' : formatPricePaise(product.currentPricePaise)}</strong><a className="course-link-button" href={`/courses/${encodeURIComponent(course.id)}`}>View course <Icon name="arrow" size={15} /></a></div>
+        <div className="course-card-footer"><strong>{product.isFree ? 'Free' : formatPricePaise(product.currentPricePaise)}{enrolled && <small className="course-enrollment-status">Enrolled</small>}</strong><a className="course-link-button" href={enrolled ? `${coursePath}/learn` : coursePath}>{enrolled ? 'Continue learning' : 'View course'} <Icon name="arrow" size={15} /></a></div>
       </div>
     </article>
   );
@@ -52,12 +54,14 @@ function FlagshipCoursePreview() {
 }
 
 export default function CourseCatalogPage() {
+  const { user } = useAuth();
   const [courseType, setCourseType] = useState('all');
   const [search, setSearch] = useState('');
   const [items, setItems] = useState([]);
   const [state, setState] = useState('loading');
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
+  const [enrolledCourseIds, setEnrolledCourseIds] = useState(() => new Set());
   const teaserMatches = (courseType === 'all' || courseType === 'video-course')
     && `${flagshipTitle} ${flagshipDescription} ${flagshipSubjects.join(' ')} Government Competitive Exam Preparation`.toLowerCase().includes(search.trim().toLowerCase());
   const hasPublishedFlagship = items.some((course) => course.product?.slug === flagshipSlug);
@@ -77,6 +81,18 @@ export default function CourseCatalogPage() {
     return () => controller.abort();
   }, [courseType, search, retry]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    setEnrolledCourseIds(new Set());
+    if (!user) return () => controller.abort();
+    courseApi.myCourses({ signal: controller.signal }).then((result) => {
+      if (!controller.signal.aborted) setEnrolledCourseIds(new Set((result.items ?? []).map((course) => String(course.id))));
+    }).catch((requestError) => {
+      if (requestError?.name !== 'AbortError') setEnrolledCourseIds(new Set());
+    });
+    return () => controller.abort();
+  }, [user?.id]);
+
   return (
     <div className="site-shell">
       <SiteHeader activePage="courses" />
@@ -94,7 +110,7 @@ export default function CourseCatalogPage() {
           {showFlagshipTeaser && <div className="course-catalog-grid course-coming-soon-grid"><FlagshipCoursePreview /></div>}
           {state === 'loading' && <div className="catalog-state-panel" role="status"><span className="loading-mark" /><h2>Loading published courses</h2><p>Checking course details and exam configuration.</p></div>}
           {state === 'error' && <div className="catalog-state-panel" role="alert"><h2>Courses are unavailable</h2><p>{error}</p><button className="secondary-button" type="button" onClick={() => setRetry((value) => value + 1)}>Try again <Icon name="arrow" size={15} /></button></div>}
-          {state === 'ready' && items.length > 0 && <div className="course-catalog-grid">{items.map((course) => <CourseCard key={course.id} course={course} />)}</div>}
+          {state === 'ready' && items.length > 0 && <div className="course-catalog-grid">{items.map((course) => <CourseCard key={course.id} course={course} enrolled={enrolledCourseIds.has(String(course.id))} />)}</div>}
           {state === 'ready' && items.length === 0 && !showFlagshipTeaser && <div className="empty-results"><span className="empty-icon"><Icon name="play" size={25} /></span><h2>No published courses found</h2><p>Try another search or check back after course content has been published.</p><button className="secondary-button" type="button" onClick={() => { setSearch(''); setCourseType('all'); }}>Clear filters</button></div>}
           <p className="course-access-note"><Icon name="shield" size={16} /> Paid lessons require an active course entitlement. A secure signed video provider must be configured before paid playback is enabled.</p>
         </div>

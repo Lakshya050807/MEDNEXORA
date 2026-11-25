@@ -3,11 +3,13 @@ const metadata = {
   '/about': ['About MEDNEXORA — Owner Confirmation Required', 'Business identity, service description and educational-content details are awaiting owner confirmation.'],
   '/contact': ['Contact MEDNEXORA — Owner Confirmation Required', 'A monitored support contact and any public business address are awaiting owner confirmation.'],
   '/faq': ['Frequently Asked Questions — Owner Confirmation Required', 'Answers about registration, access, purchases, refunds and support are awaiting owner confirmation.'],
-  '/privacy-policy': ['Privacy Policy — MEDNEXORA', 'Draft privacy policy page requiring owner confirmation before public launch.'],
-  '/terms-and-conditions': ['Terms and Conditions — MEDNEXORA', 'Draft terms page requiring owner and legal review before public launch.'],
-  '/refund-cancellation-policy': ['Refund and Cancellation Policy — MEDNEXORA', 'Draft refund and cancellation policy awaiting owner confirmation.'],
+  '/privacy-policy': ['Draft Privacy Policy — MEDNEXORA', 'Draft privacy policy page requiring owner confirmation before public launch.'],
+  '/terms-and-conditions': ['Draft Terms and Conditions — MEDNEXORA', 'Draft terms page requiring owner and legal review before public launch.'],
+  '/refund-cancellation-policy': ['Draft Refund and Cancellation Policy — MEDNEXORA', 'Draft refund and cancellation policy awaiting owner confirmation.'],
   '/login': ['Student Login — MEDNEXORA', 'Sign in to your MEDNEXORA student account.'],
   '/register': ['Create a Student Account — MEDNEXORA', 'Create a student account to use MEDNEXORA study and practice resources.'],
+  '/forgot-password': ['Password Recovery — MEDNEXORA', 'Request instructions to reset your MEDNEXORA account password.'],
+  '/reset-password': ['Reset Password — MEDNEXORA', 'Choose a new password for your MEDNEXORA account.'],
   '/admin/login': ['Admin Login — MEDNEXORA', 'Administrator access for the MEDNEXORA content workspace.'],
   '/admin': ['Admin Workspace — MEDNEXORA', 'Manage MEDNEXORA educational content and platform records.'],
   '/student/dashboard': ['Student Dashboard — MEDNEXORA', 'View your MEDNEXORA resources, courses and recorded practice activity.'],
@@ -32,7 +34,7 @@ export function pageMetadataFor(pathname = '/') {
 function isPrivatePath(path) {
   return /^\/(?:admin|student|my-courses|orders|cart|practice)(?:\/|$)/u.test(path)
     || /^\/courses\/[^/]+\/learn$/u.test(path)
-    || path === '/login' || path === '/register';
+    || path === '/login' || path === '/register' || path === '/forgot-password' || path === '/reset-password';
 }
 
 function isUnconfirmedPage(path) {

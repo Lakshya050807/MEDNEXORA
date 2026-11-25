@@ -204,7 +204,6 @@ async function getPublishedCourse(CourseModel, courseId) {
 }
 
 async function hasCourseAccess({ course, studentId, PurchasedAccessModel }) {
-  if (course.product?.currentPricePaise === 0) return true;
   return Boolean(await PurchasedAccessModel.exists({ student: studentId, product: idOf(course.product), status: 'active' }));
 }
 
@@ -335,41 +334,84 @@ export function createCourseController({ CourseModel, ProductModel, ExamModel })
         const course = await getPublishedCourse(CourseModel, request.params.courseId);
         const lesson = getLesson(course, request.params.lessonId);
         if (!lesson) return response.status(404).json({ message: 'The lesson was not found in this course.' });
-        if (!lesson.isPreview && course.product?.currentPricePaise !== 0) return response.status(403).json({ message: 'This lesson is not available as a free preview.' });
+        if (!lesson.isPreview) return response.status(403).json({ message: 'This lesson is not available as a free preview.' });
         return response.status(200).json(playbackResult(course, lesson, { isPreview: true }));
       } catch (caught) { return next(caught); }
     },
   };
 }
 
-export function createStudentCourseController({ CourseModel, ProductModel, CourseProgressModel, PurchasedAccessModel }) {
+export function createStudentCourseController({ CourseModel, CourseProgressModel, PurchasedAccessModel }) {
   return {
     listMyCourses: async (request, response, next) => {
       try {
         const studentId = idOf(request.user);
-        const [accesses, savedProgress, freeProducts] = await Promise.all([
-          queryLean(PurchasedAccessModel.find({ student: studentId, status: 'active' }).select('product')),
+        const [accesses, savedProgress] = await Promise.all([
+          queryLean(PurchasedAccessModel.find({ student: studentId, status: 'active' }).select('product source')),
           queryLean(CourseProgressModel.find({ student: studentId }).select('course completedLessonIds lastLessonId')),
-          queryLean(ProductModel.find({ publicationStatus: 'published', resourceType: { $in: supportedCourseTypes }, currentPricePaise: 0 }).select('_id')),
         ]);
-        const purchasedProductIds = new Set((accesses ?? []).map((entry) => idOf(entry.product)));
+        const accessByProduct = new Map((accesses ?? []).map((entry) => [idOf(entry.product), entry]));
+        const enrolledProductIds = new Set(accessByProduct.keys());
         const progressByCourse = new Map((savedProgress ?? []).map((entry) => [idOf(entry.course), entry]));
-        const productIds = new Set([...purchasedProductIds, ...(freeProducts ?? []).map(idOf)]);
-        const courseFilter = { publicationStatus: 'published', product: { $in: [...productIds] } };
+        const courseFilter = { publicationStatus: 'published', product: { $in: [...enrolledProductIds] } };
         const courses = await populateCourse(CourseModel.find(courseFilter)).sort({ updatedAt: -1 }).lean();
         const items = courses.filter((course) => course.product && course.exam).map((course) => ({
           ...serializeWithProgress(course, progressByCourse.get(idOf(course))),
-          accessType: purchasedProductIds.has(idOf(course.product)) ? 'purchased' : 'free',
+          accessType: accessByProduct.get(idOf(course.product))?.source === 'free' ? 'free' : 'purchased',
           continueLessonId: visibleLastLessonId(course, progressByCourse.get(idOf(course))),
         }));
         return response.status(200).json({ items });
       } catch (caught) { return next(caught); }
     },
 
+    enrollFreeCourse: async (request, response, next) => {
+      try {
+        response.set('Cache-Control', 'private, no-store');
+        const course = await getPublishedCourse(CourseModel, request.params.courseId);
+        if (course.product?.currentPricePaise !== 0) {
+          return response.status(409).json({ message: 'This course is not free. Use its secure purchase flow to get access.' });
+        }
+        const studentId = idOf(request.user);
+        const productId = idOf(course.product);
+        const existing = await queryLean(PurchasedAccessModel.findOne({ student: studentId, product: productId }));
+        if (existing?.status === 'active') {
+          return response.status(200).json({ access: { courseId: idOf(course), productId, source: existing.source ?? 'purchase', grantedAt: existing.grantedAt ?? existing.createdAt ?? null } });
+        }
+        if (existing) return response.status(409).json({ message: 'This course has a revoked access record. Contact support if you think this is an error.' });
+
+        const grantedAt = new Date();
+        try {
+          await PurchasedAccessModel.create({ student: studentId, product: productId, order: null, source: 'free', status: 'active', grantedAt });
+        } catch (caught) {
+          if (caught?.code !== 11000) throw caught;
+          const latest = await queryLean(PurchasedAccessModel.findOne({ student: studentId, product: productId }));
+          if (latest?.status !== 'active') throw caught;
+          return response.status(200).json({ access: { courseId: idOf(course), productId, source: latest.source ?? 'purchase', grantedAt: latest.grantedAt ?? latest.createdAt ?? null } });
+        }
+        return response.status(201).json({ access: { courseId: idOf(course), productId, source: 'free', grantedAt } });
+      } catch (caught) {
+        if (caught?.name === 'ValidationError') return response.status(400).json({ message: 'Free course enrollment could not be recorded.' });
+        return next(caught);
+      }
+    },
+
+    getLessonContent: async (request, response, next) => {
+      try {
+        response.set('Cache-Control', 'private, no-store');
+        const course = await getPublishedCourse(CourseModel, request.params.courseId);
+        const lesson = getLesson(course, request.params.lessonId);
+        if (!lesson) return response.status(404).json({ message: 'The lesson was not found in this course.' });
+        if (!await hasCourseAccess({ course, studentId: idOf(request.user), PurchasedAccessModel })) {
+          return response.status(403).json({ message: 'Enroll in or purchase this course to access lesson content.' });
+        }
+        return response.status(200).json({ lesson: { id: idOf(lesson), title: lesson.title, contentText: lesson.contentText ?? '' } });
+      } catch (caught) { return next(caught); }
+    },
+
     getProgress: async (request, response, next) => {
       try {
         const course = await getPublishedCourse(CourseModel, request.params.courseId);
-        if (!await hasCourseAccess({ course, studentId: idOf(request.user), PurchasedAccessModel })) return response.status(403).json({ message: 'Purchase this course to view your learning progress.' });
+        if (!await hasCourseAccess({ course, studentId: idOf(request.user), PurchasedAccessModel })) return response.status(403).json({ message: 'Enroll in or purchase this course to view your learning progress.' });
         const progress = await queryLean(CourseProgressModel.findOne({ student: idOf(request.user), course: idOf(course) }));
         return response.status(200).json({ progress: { ...progressSummary(course, progress), lastLessonId: visibleLastLessonId(course, progress) } });
       } catch (caught) { return next(caught); }
@@ -380,7 +422,7 @@ export function createStudentCourseController({ CourseModel, ProductModel, Cours
         const course = await getPublishedCourse(CourseModel, request.params.courseId);
         const lesson = getLesson(course, request.params.lessonId);
         if (!lesson) return response.status(404).json({ message: 'The lesson was not found in this course.' });
-        if (!await hasCourseAccess({ course, studentId: idOf(request.user), PurchasedAccessModel })) return response.status(403).json({ message: 'Purchase this course before saving lesson progress.' });
+        if (!await hasCourseAccess({ course, studentId: idOf(request.user), PurchasedAccessModel })) return response.status(403).json({ message: 'Enroll in or purchase this course before saving lesson progress.' });
         const progress = await CourseProgressModel.findOneAndUpdate(
           { student: idOf(request.user), course: idOf(course) },
           { $set: { lastLessonId: idOf(lesson) }, $addToSet: { completedLessonIds: idOf(lesson) } },
@@ -395,7 +437,7 @@ export function createStudentCourseController({ CourseModel, ProductModel, Cours
         const course = await getPublishedCourse(CourseModel, request.params.courseId);
         const lesson = getLesson(course, request.params.lessonId);
         if (!lesson) return response.status(404).json({ message: 'The lesson was not found in this course.' });
-        if (!await hasCourseAccess({ course, studentId: idOf(request.user), PurchasedAccessModel })) return response.status(403).json({ message: 'Purchase this course before opening this lesson.' });
+        if (!await hasCourseAccess({ course, studentId: idOf(request.user), PurchasedAccessModel })) return response.status(403).json({ message: 'Enroll in or purchase this course before opening this lesson.' });
         return response.status(200).json(playbackResult(course, lesson, { isPreview: lesson.isPreview }));
       } catch (caught) { return next(caught); }
     },

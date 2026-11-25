@@ -20,7 +20,7 @@ const courseId = '507f1f77bcf86cd799439215';
 describe('admin dashboard study material create flow', () => {
   beforeEach(() => {
     adminApi.profile.mockReset().mockResolvedValue({ user: { name: 'Admin User', username: 'mednexora-admin' } });
-    adminApi.overview.mockReset().mockResolvedValue({ metrics: {} });
+    adminApi.overview.mockReset().mockResolvedValue({ metrics: {}, contentReadiness: { counts: {}, issues: [], courses: [] } });
     adminApi.list.mockReset().mockImplementation((resource, filters = {}) => {
       const items = resource === 'exams' && filters.page === 1
         ? [{ _id: firstPageExamId, name: 'First-page examination', publicationStatus: 'draft' }]

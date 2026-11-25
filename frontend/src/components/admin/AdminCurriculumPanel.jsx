@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Icon from '../Icon.jsx';
 import { adminApi } from '../../services/adminApi.js';
+import AdminCourseLessonsPanel from './AdminCourseLessonsPanel.jsx';
 
 const subjectSlots = [
   { slug: 'physics', label: 'Physics' },
@@ -32,7 +33,7 @@ function ErrorText({ children }) {
   return children ? <p className="admin-message is-error curriculum-feedback" role="alert">{children}</p> : null;
 }
 
-function RecordEditor({ editor, exams, chapters, topicReferenced = false, onCancel, onSubmit, saving }) {
+function RecordEditor({ editor, exams, chapters, topicReferenced = false, onCancel, onSubmit, saving, onDirtyChange }) {
   const { kind, record, subjectId, chapterId, examId } = editor;
   const [name, setName] = useState(record?.name ?? '');
   const [slug, setSlug] = useState(record?.slug ?? '');
@@ -80,12 +81,12 @@ function RecordEditor({ editor, exams, chapters, topicReferenced = false, onCanc
     <section className="curriculum-editor" aria-labelledby="curriculum-editor-title">
       <div className="curriculum-editor-head"><div><p className="eyebrow">CURRICULUM EDITOR</p><h3 id="curriculum-editor-title">{title}</h3><p>{selectedExam?.name ? `Examination: ${selectedExam.name}` : 'The course examination and parent records are fixed for this edit.'}</p></div><button className="admin-quiet-button" type="button" onClick={onCancel}>Cancel</button></div>
       <form className="curriculum-form" onSubmit={submit}>
-        <label className="admin-field"><span>{isSubject ? 'Subject name' : `${kind[0].toUpperCase()}${kind.slice(1)} title`}</span><input value={name} onChange={(event) => { const next = event.target.value; setName(next); if (!slugEdited && !isSubject) setSlug(slugify(next)); }} maxLength={isSubject ? 120 : 160} required /></label>
-        {!isSubject && <label className="admin-field"><span>URL slug</span><input value={slug} onChange={(event) => { setSlug(event.target.value); setSlugEdited(true); }} maxLength={160} pattern="[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*" required /><small>Created from the title by default; you can adjust it before saving.</small></label>}
-        {kind === 'topic' && (topicParentFixed ? <label className="admin-field"><span>Chapter</span><input value={availableChapters.find((chapter) => idOf(chapter) === idOf(record?.chapter))?.name ?? (record?.chapter ? 'Configured chapter' : 'Unassigned')} readOnly /><small>Parent mappings are locked here to protect existing dependent content.</small></label> : <label className="admin-field"><span>Chapter</span><select value={selectedChapter} onChange={(event) => setSelectedChapter(event.target.value)} required><option value="">Choose a chapter</option>{availableChapters.map((chapter) => <option key={idOf(chapter)} value={idOf(chapter)}>{chapter.name} · {chapter.publicationStatus}</option>)}</select></label>)}
-        <label className="admin-field curriculum-field-description"><span>Description</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={kind === 'subject' ? 2000 : 3000} rows={3} /></label>
-        <label className="admin-field"><span>Display order</span><input type="number" min="0" max="10000" step="1" value={sortOrder} onChange={(event) => setSortOrder(event.target.value)} required /></label>
-        <label className="admin-field"><span>Publication state</span><select value={publicationStatus} onChange={(event) => setPublicationStatus(event.target.value)}>{statuses.map((status) => <option key={status.value} value={status.value}>{status.label}</option>)}</select><small>Publishing is checked against the configured exam and parent hierarchy.</small></label>
+        <label className="admin-field"><span>{isSubject ? 'Subject name' : `${kind[0].toUpperCase()}${kind.slice(1)} title`}</span><input value={name} onChange={(event) => { const next = event.target.value; setName(next); if (!slugEdited && !isSubject) setSlug(slugify(next)); onDirtyChange?.(true); }} maxLength={isSubject ? 120 : 160} required /></label>
+        {!isSubject && <label className="admin-field"><span>URL slug</span><input value={slug} onChange={(event) => { setSlug(event.target.value); setSlugEdited(true); onDirtyChange?.(true); }} maxLength={160} pattern="[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*" required /><small>Created from the title by default; you can adjust it before saving.</small></label>}
+        {kind === 'topic' && (topicParentFixed ? <label className="admin-field"><span>Chapter</span><input value={availableChapters.find((chapter) => idOf(chapter) === idOf(record?.chapter))?.name ?? (record?.chapter ? 'Configured chapter' : 'Unassigned')} readOnly /><small>Parent mappings are locked here to protect existing dependent content.</small></label> : <label className="admin-field"><span>Chapter</span><select value={selectedChapter} onChange={(event) => { setSelectedChapter(event.target.value); onDirtyChange?.(true); }} required><option value="">Choose a chapter</option>{availableChapters.map((chapter) => <option key={idOf(chapter)} value={idOf(chapter)}>{chapter.name} · {chapter.publicationStatus}</option>)}</select></label>)}
+        <label className="admin-field curriculum-field-description"><span>Description</span><textarea value={description} onChange={(event) => { setDescription(event.target.value); onDirtyChange?.(true); }} maxLength={kind === 'subject' ? 2000 : 3000} rows={3} /></label>
+        <label className="admin-field"><span>Display order</span><input type="number" min="0" max="10000" step="1" value={sortOrder} onChange={(event) => { setSortOrder(event.target.value); onDirtyChange?.(true); }} required /></label>
+        <label className="admin-field"><span>Publication state</span><select value={publicationStatus} onChange={(event) => { setPublicationStatus(event.target.value); onDirtyChange?.(true); }}>{statuses.map((status) => <option key={status.value} value={status.value}>{status.label}</option>)}</select><small>Publishing is checked against the configured exam and parent hierarchy.</small></label>
         {localError && <ErrorText>{localError}</ErrorText>}
         <div className="curriculum-editor-actions"><button className="admin-quiet-button" type="button" onClick={onCancel}>Cancel</button><button className="admin-primary-button" type="submit" disabled={saving}>{saving ? 'Saving…' : record ? 'Save changes' : publicationStatus === 'published' ? 'Create & publish' : 'Create draft'}</button></div>
       </form>
@@ -101,8 +102,8 @@ function SummaryCard({ label, value, detail, icon }) {
   return <article className="admin-metric-card curriculum-summary-card"><span className="metric-icon"><Icon name={icon} size={18} /></span><small>{label}</small><strong>{value}</strong><span>{detail}</span></article>;
 }
 
-export default function AdminCurriculumPanel({ exams = [], subjects = [], chapters = [], topics = [], courses = [], products = [], questionBanks = [], onSaved, onNavigate }) {
-  const [editor, setEditor] = useState(null);
+export default function AdminCurriculumPanel({ exams = [], subjects = [], chapters = [], topics = [], courses = [], products = [], questionBanks = [], onSaved, onNavigate, onDirtyChange }) {
+  const [editor, setEditorState] = useState(null);
   const [saving, setSaving] = useState(false);
   const [savingLessonId, setSavingLessonId] = useState('');
   const [publishingKey, setPublishingKey] = useState('');
@@ -110,7 +111,15 @@ export default function AdminCurriculumPanel({ exams = [], subjects = [], chapte
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [courseOverride, setCourseOverride] = useState(null);
+  const [editorDirty, setEditorDirty] = useState(false);
   const [publicationOverrides, setPublicationOverrides] = useState({});
+
+  const setEditor = (nextEditor) => {
+    if (editorDirty && !window.confirm('Discard unsaved subject, chapter, or topic changes?')) return;
+    setEditorState(nextEditor);
+    setEditorDirty(false);
+    onDirtyChange?.(false);
+  };
 
   const configuredCourse = useMemo(() => courses.find((item) => item.product?.slug === 'bsc-nursing-entrance-preparation') ?? null, [courses]);
   useEffect(() => setCourseOverride(null), [configuredCourse]);
@@ -142,7 +151,7 @@ export default function AdminCurriculumPanel({ exams = [], subjects = [], chapte
   const publishedCount = curriculumRecords.filter((item) => item.publicationStatus === 'published').length;
   const draftCount = curriculumRecords.filter((item) => item.publicationStatus === 'draft').length;
 
-  const refresh = () => { setEditor(null); setNotice('Saved successfully.'); setError(''); onSaved?.(); };
+  const refresh = (resource) => { setEditorState(null); setEditorDirty(false); onDirtyChange?.(false); setNotice('Saved successfully.'); setError(''); onSaved?.(resource); };
 
   const saveRecord = async (payload) => {
     if (!editor) return;
@@ -153,7 +162,8 @@ export default function AdminCurriculumPanel({ exams = [], subjects = [], chapte
     try {
       if (editor.record) await adminApi.update(resource, idOf(editor.record), payload);
       else await adminApi.create(resource, payload);
-      refresh();
+      setEditorDirty(false); onDirtyChange?.(false);
+      refresh(resource);
     } catch (requestError) {
       setError(requestError.message || `Could not save this ${editor.kind}.`);
     } finally {
@@ -171,7 +181,7 @@ export default function AdminCurriculumPanel({ exams = [], subjects = [], chapte
       const savedStatus = response?.[kind]?.publicationStatus ?? nextStatus;
       setPublicationOverrides((current) => ({ ...current, [key]: savedStatus }));
       setNotice(`${record.name} is now ${savedStatus}.`);
-      onSaved?.();
+      onSaved?.(resourceByKind[kind]);
     } catch (requestError) {
       setError(requestError.message || `Could not ${nextStatus === 'published' ? 'publish' : 'unpublish'} this ${kind}.`);
     } finally { setPublishingKey(''); }
@@ -183,7 +193,7 @@ export default function AdminCurriculumPanel({ exams = [], subjects = [], chapte
     try {
       await adminApi.remove(resourceByKind[kind], idOf(record));
       setNotice(`${record.name} was deleted.`);
-      onSaved?.();
+      onSaved?.(resourceByKind[kind]);
     } catch (requestError) { setError(requestError.message || 'This record could not be deleted.'); }
   };
 
@@ -207,7 +217,7 @@ export default function AdminCurriculumPanel({ exams = [], subjects = [], chapte
       if (response.course) setCourseOverride(response.course);
       setMappingSelections((current) => ({ ...current, [lessonId]: selectedTopicId }));
       setNotice('Lesson topic mapping saved. This does not create a lesson or grant course access.');
-      onSaved?.();
+      onSaved?.('courses');
     } catch (requestError) { setError(requestError.message || 'The lesson topic mapping could not be saved.'); }
     finally { setSavingLessonId(''); }
   };
@@ -238,7 +248,7 @@ export default function AdminCurriculumPanel({ exams = [], subjects = [], chapte
         <SummaryCard label="Draft" value={draftCount} detail="Subjects, chapters and topics" icon="file" />
       </div>
 
-      {editor && <RecordEditor key={`${editor.kind}-${idOf(editor.record) || 'new'}-${editor.chapterId || editor.subjectId || ''}`} editor={editor} exams={exams} chapters={courseChapters} topicReferenced={editor.kind === 'topic' && editor.record ? hasProductRef('topic', idOf(editor.record)) || hasQuestionRef(idOf(editor.record)) || hasCourseRef('topic', idOf(editor.record)) : false} onCancel={() => setEditor(null)} onSubmit={saveRecord} saving={saving} />}
+      {editor && <RecordEditor key={`${editor.kind}-${idOf(editor.record) || 'new'}-${editor.chapterId || editor.subjectId || ''}`} editor={editor} exams={exams} chapters={courseChapters} topicReferenced={editor.kind === 'topic' && editor.record ? hasProductRef('topic', idOf(editor.record)) || hasQuestionRef(idOf(editor.record)) || hasCourseRef('topic', idOf(editor.record)) : false} onCancel={() => setEditor(null)} onSubmit={saveRecord} saving={saving} onDirtyChange={(value) => { setEditorDirty(value); onDirtyChange?.(value); }} />}
 
       <div className="curriculum-subject-grid">
         {subjectSlotsInCourse.map(({ slug, label, record }) => {
@@ -284,6 +294,8 @@ export default function AdminCurriculumPanel({ exams = [], subjects = [], chapte
           );
         })}
       </div>
+
+      <AdminCourseLessonsPanel course={course} subjects={courseSubjects} chapters={courseChapters} topics={courseTopics} products={products} onSaved={onSaved} onNavigate={onNavigate} onDirtyChange={onDirtyChange} />
 
       <section className="curriculum-mapping-card" aria-labelledby="curriculum-mapping-title">
         <div className="curriculum-mapping-heading"><div><p className="eyebrow">EXISTING COURSE LESSONS</p><h3 id="curriculum-mapping-title">Map lessons to topics</h3><p>Select a topic that belongs to the lesson module’s existing subject and chapter. This only changes the lesson mapping.</p></div><span className="curriculum-mapping-note"><Icon name="shield" size={15} /> No enrollment or progress changes</span></div>

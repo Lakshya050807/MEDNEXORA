@@ -8,6 +8,7 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { useCart } from '../context/CartContext.jsx';
 import { catalogApi } from '../services/catalogApi.js';
 import { paymentApi } from '../services/paymentApi.js';
+import { launchApi } from '../services/launchApi.js';
 
 function loadCheckoutSdk() {
   if (window.Razorpay) return Promise.resolve(true);
@@ -40,8 +41,19 @@ export default function CartPage() {
   const [loadState, setLoadState] = useState('ready');
   const [message, setMessage] = useState('');
   const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const [paidPurchasesAvailability, setPaidPurchasesAvailability] = useState('checking');
   const keyRef = useRef({ cartKey: '', value: '' });
   const cartKey = items.map((item) => item.productId).sort().join('|');
+
+  useEffect(() => {
+    let active = true;
+    launchApi.getStatus().then((status) => {
+      if (active) setPaidPurchasesAvailability(status.paidPurchasesEnabled ? 'open' : 'closed');
+    }).catch(() => {
+      if (active) setPaidPurchasesAvailability('unavailable');
+    });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -77,6 +89,12 @@ export default function CartPage() {
 
   const startCheckout = async () => {
     setMessage('');
+    if (paidPurchasesAvailability !== 'open') {
+      setMessage(paidPurchasesAvailability === 'checking'
+        ? 'Checking paid purchase availability. Please try again in a moment.'
+        : 'Paid purchases are temporarily unavailable.');
+      return;
+    }
     if (!user) {
       window.location.assign('/login?next=%2Fcart');
       return;
@@ -208,7 +226,10 @@ export default function CartPage() {
               <div className="cart-summary-row"><span>Items</span><strong>{lines.length}</strong></div>
               {discount > 0 && <div className="cart-summary-row cart-saving-row"><span>Discounts</span><strong>−{formatPricePaise(discount)}</strong></div>}
               <div className="cart-summary-total"><span>Total</span><strong>{formatPricePaise(subtotal) ?? '—'}</strong></div>
-              <button className="commerce-primary-button" type="button" disabled={checkoutBusy || loadState !== 'ready' || hasUnavailableProducts || authStatus === 'loading'} onClick={startCheckout}>{checkoutBusy ? 'Preparing secure checkout…' : user ? 'Continue to Razorpay' : 'Sign in to checkout'} <Icon name="arrow" size={16} /></button>
+              {paidPurchasesAvailability === 'closed' && <p className="launch-gate-message" role="status">Paid purchases are not open yet while the required public policies are being finalized.</p>}
+              {paidPurchasesAvailability === 'unavailable' && <p className="launch-gate-message" role="alert">Paid purchase availability could not be checked. Checkout is disabled for now.</p>}
+              {paidPurchasesAvailability === 'checking' && <p className="launch-gate-message" role="status">Checking paid purchase availability…</p>}
+              <button className="commerce-primary-button" type="button" disabled={paidPurchasesAvailability !== 'open' || checkoutBusy || loadState !== 'ready' || hasUnavailableProducts || authStatus === 'loading'} onClick={startCheckout}>{checkoutBusy ? 'Preparing secure checkout…' : paidPurchasesAvailability !== 'open' ? 'Purchases unavailable' : user ? 'Continue to Razorpay' : 'Sign in to checkout'} <Icon name="arrow" size={16} /></button>
               <p className="cart-security-note"><Icon name="shield" size={15} /> Payment details are entered in Razorpay Checkout. This website does not store card details.</p>
               <p className="cart-server-check-note">The server recalculates the amount using the current published catalogue. Access is granted only after a captured payment is verified.</p>
               {user && <a className="cart-orders-link" href="/orders">View order history</a>}

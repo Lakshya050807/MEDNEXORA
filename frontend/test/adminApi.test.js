@@ -37,3 +37,18 @@ test('admin API omits invalid pagination so backend defaults apply without weake
     '/api/admin/orders',
   ]);
 });
+
+test('admin overview optionally includes content readiness without adding a separate request', async (t) => {
+  const calls = mockJson(t);
+  await adminApi.overview();
+  await adminApi.overview({ includeContentReadiness: true });
+
+  assert.deepEqual(calls.map(({ url }) => url), [
+    '/api/admin/overview',
+    '/api/admin/overview?includeContentReadiness=true',
+  ]);
+  for (const { options } of calls) {
+    assert.equal(options.credentials, 'same-origin');
+    assert.equal(options.cache, 'no-store');
+  }
+});

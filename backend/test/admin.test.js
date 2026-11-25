@@ -367,6 +367,52 @@ test('admin dashboard metrics use actual records and only count verified paid re
   assert.equal(Object.hasOwn(result.payload, 'configuration'), false);
 });
 
+test('content readiness is admin-only and returns safe publication counts and warnings', async () => {
+  const courseProductId = '507f1f77bcf86cd799439201';
+  const mockProductId = '507f1f77bcf86cd799439202';
+  const courseId = '507f1f77bcf86cd799439203';
+  const chapterId = '507f1f77bcf86cd799439204';
+  const topicId = '507f1f77bcf86cd799439205';
+  const bankId = '507f1f77bcf86cd799439206';
+  const mockId = '507f1f77bcf86cd799439207';
+  collections.StudyMaterial.push(
+    new FakeRecord({ _id: courseProductId, title: 'Readiness course', resourceType: 'video-course', publicationStatus: 'draft', exam: examId, course: courseId, contentUrl: 'private/private-pdf-path' }, 'StudyMaterial'),
+    new FakeRecord({ _id: mockProductId, title: 'Readiness mock listing', resourceType: 'mock-test', publicationStatus: 'draft', exam: examId }, 'StudyMaterial'),
+    new FakeRecord({ _id: '507f1f77bcf86cd799439208', title: 'Readiness notes', resourceType: 'notes', publicationStatus: 'draft', exam: examId, subject: subjectId }, 'StudyMaterial'),
+  );
+  collections.Chapter.push(new FakeRecord({ _id: chapterId, name: 'Readiness chapter', exam: examId, subject: subjectId, publicationStatus: 'draft' }, 'Chapter'));
+  collections.Topic.push(new FakeRecord({ _id: topicId, name: 'Readiness topic', exam: examId, subject: subjectId, chapter: chapterId, publicationStatus: 'draft' }, 'Topic'));
+  collections.Course.push(new FakeRecord({
+    _id: courseId, product: courseProductId, exam: examId, subjects: [subjectId], publicationStatus: 'draft',
+    modules: [{ subject: subjectId, chapter: chapterId, lessons: [{ _id: '507f1f77bcf86cd799439209', title: 'Private lesson', contentText: 'private lesson text', publicationStatus: 'draft', topic: topicId }] }],
+  }, 'Course'));
+  collections.QuestionBank.push(new FakeRecord({
+    _id: bankId, title: 'Readiness questions', exam: examId, subject: subjectId, publicationStatus: 'draft',
+    questions: [{ _id: '507f1f77bcf86cd799439210', prompt: 'private question prompt', options: ['A', 'B'], correctAnswerIndex: 0, explanation: '', topic: topicId }],
+  }, 'QuestionBank'));
+  collections.MockTest.push(new FakeRecord({
+    _id: mockId, title: 'Readiness test', product: mockProductId, exam: examId, questionBanks: [bankId], questionCount: 2, publicationStatus: 'draft',
+  }, 'MockTest'));
+
+  assert.equal((await request('/api/admin/overview?includeContentReadiness=true')).response.status, 401);
+  const student = await request('/api/auth/login', { method: 'POST', body: { email: 'student@example.com', password: 'student-secret-password-123' } });
+  assert.equal(student.response.status, 200);
+  assert.equal((await request('/api/admin/overview?includeContentReadiness=true', { cookie: student.cookie })).response.status, 401);
+
+  const admin = await request('/api/admin/overview?includeContentReadiness=true', { cookie: await loginAdmin() });
+  assert.equal(admin.response.status, 200);
+  assert.equal(admin.response.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(admin.payload.contentReadiness.counts.subjects, { total: 1, published: 1, draft: 0, archived: 0 });
+  assert.deepEqual(admin.payload.contentReadiness.counts.lessons, { total: 1, published: 0, draft: 1, archived: 0 });
+  assert.deepEqual(admin.payload.contentReadiness.counts.mcqs, { total: 1, published: 0, draft: 1, archived: 0 });
+  assert.equal(admin.payload.contentReadiness.issues.find((issue) => issue.key === 'mock-tests-with-insufficient-questions').count, 1);
+  const serialized = JSON.stringify(admin.payload);
+  assert.equal(serialized.includes('private lesson text'), false);
+  assert.equal(serialized.includes('private question prompt'), false);
+  assert.equal(serialized.includes('private/private-pdf-path'), false);
+  assert.equal(serialized.includes('correctAnswerIndex'), false);
+});
+
 test('admin list pagination defaults missing or empty values and enforces the 50-row limit', async () => {
   const cookie = await loginAdmin();
   const defaults = await request('/api/admin/exams', { cookie });
@@ -1023,7 +1069,27 @@ test('question bank create and update persist answer explanations for admin revi
   assert.equal(updated.payload.questionBank.title, 'Biology entrance MCQs');
 });
 
+test('question bank publication requires four complete options and a correct answer', async () => {
+  const cookie = await loginAdmin();
+  const incomplete = await request('/api/admin/question-banks', { method: 'POST', cookie, body: {
+    exam: examId, subject: subjectId, title: 'Incomplete draft questions', questions: [{ prompt: 'A prompt?', options: ['A', 'B'], correctAnswerIndex: 1 }], publicationStatus: 'draft',
+  } });
+  assert.equal(incomplete.response.status, 201);
+  const rejected = await request(`/api/admin/question-banks/${incomplete.payload.questionBank._id}`, { method: 'PATCH', cookie, body: { publicationStatus: 'published' } });
+  assert.equal(rejected.response.status, 400);
+  assert.match(rejected.payload.message, /four non-empty options/u);
+
+  const ready = await request('/api/admin/question-banks', { method: 'POST', cookie, body: {
+    exam: examId, subject: subjectId, title: 'Complete draft questions', questions: [{ prompt: 'A prompt?', options: ['A', 'B', 'C', 'D'], correctAnswerIndex: 1, explanation: 'Administrator-reviewed explanation.' }], publicationStatus: 'draft',
+  } });
+  const published = await request(`/api/admin/question-banks/${ready.payload.questionBank._id}`, { method: 'PATCH', cookie, body: { publicationStatus: 'published' } });
+  assert.equal(published.response.status, 200);
+  assert.equal(published.payload.questionBank.questions[0].options.length, 4);
+});
+
 test('admin can create and update course modules, lesson video metadata, and mock-test marking rules', async () => {
+  const unauthorizedDelete = await request('/api/admin/courses/507f1f77bcf86cd799439301/lessons/507f1f77bcf86cd799439302', { method: 'DELETE' });
+  assert.equal(unauthorizedDelete.response.status, 401);
   const cookie = await loginAdmin();
   const courseChapter = await request('/api/admin/chapters', { method: 'POST', cookie, body: {
     exam: examId, subject: subjectId, name: 'Configured Biology Chapter', slug: 'configured-biology-chapter', publicationStatus: 'draft',
@@ -1045,7 +1111,7 @@ test('admin can create and update course modules, lesson video metadata, and moc
     body: {
       product: videoProduct.payload.product.id, exam: examId, subjects: [subjectId], courseType: 'video-course',
       durationMinutes: 40, lessonCount: 1, publicationStatus: 'draft',
-      modules: [{ _id: '507f1f77bcf86cd799439301', title: 'Cell biology', subject: subjectId, chapter: courseChapter.payload.chapter._id, lessons: [{ _id: '507f1f77bcf86cd799439302', title: 'Cell structure', topic: courseTopic.payload.topic._id, durationMinutes: 40, videoProvider: 'private-hosted', videoAssetId: 'video-asset-key-9', isPreview: false }] }],
+      modules: [{ _id: '507f1f77bcf86cd799439301', title: 'Cell biology', subject: subjectId, chapter: courseChapter.payload.chapter._id, lessons: [{ _id: '507f1f77bcf86cd799439302', title: 'Cell structure', topic: courseTopic.payload.topic._id, contentText: 'Administrator-authored lesson text.', durationMinutes: 40, videoProvider: 'private-hosted', videoAssetId: 'video-asset-key-9', isPreview: false }] }],
     },
   });
   assert.equal(course.response.status, 201);
@@ -1053,6 +1119,7 @@ test('admin can create and update course modules, lesson video metadata, and moc
   assert.equal(course.payload.course.modules[0].lessons[0].topic, courseTopic.payload.topic._id);
   assert.equal(course.payload.course.modules[0].lessons[0].publicationStatus, 'draft');
   assert.equal(course.payload.course.modules[0].chapter, courseChapter.payload.chapter._id);
+  assert.equal(course.payload.course.modules[0].lessons[0].contentText, 'Administrator-authored lesson text.');
   const protectedChapter = await request(`/api/admin/chapters/${courseChapter.payload.chapter._id}`, { method: 'DELETE', cookie });
   assert.equal(protectedChapter.response.status, 409);
   assert.match(protectedChapter.payload.message, /course module/i);
@@ -1072,6 +1139,7 @@ test('admin can create and update course modules, lesson video metadata, and moc
   assert.equal(lessonEdit.payload.course.modules[0]._id, '507f1f77bcf86cd799439301');
   assert.equal(lessonEdit.payload.course.modules[0].lessons[0]._id, '507f1f77bcf86cd799439302');
   assert.equal(lessonEdit.payload.course.modules[0].lessons[0].topic, courseTopic.payload.topic._id, 'omitting the topic from an ordinary edit retains its mapping');
+  assert.equal(lessonEdit.payload.course.modules[0].lessons[0].contentText, 'Administrator-authored lesson text.', 'an ordinary edit preserves lesson content when it is omitted from the request');
   assert.deepEqual(collections.CourseProgress[0], progressSnapshot);
   const topicInUse = await request(`/api/admin/topics/${courseTopic.payload.topic._id}`, { method: 'DELETE', cookie });
   assert.equal(topicInUse.response.status, 409);
@@ -1084,6 +1152,15 @@ test('admin can create and update course modules, lesson video metadata, and moc
   } });
   assert.equal(invalidChapter.response.status, 400);
   assert.match(invalidChapter.payload.message, /chapter must belong|chapter.*module subject/i);
+
+  const deleteBlocked = await request(`/api/admin/courses/${course.payload.course._id}/lessons/507f1f77bcf86cd799439302`, { method: 'DELETE', cookie });
+  assert.equal(deleteBlocked.response.status, 409);
+  assert.match(deleteBlocked.payload.message, /saved student progress/u);
+  collections.CourseProgress.length = 0;
+  const deletedLesson = await request(`/api/admin/courses/${course.payload.course._id}/lessons/507f1f77bcf86cd799439302`, { method: 'DELETE', cookie });
+  assert.equal(deletedLesson.response.status, 200);
+  assert.equal(deletedLesson.payload.lessonCount, 0);
+  assert.equal(collections.Course.find((item) => String(item._id) === String(course.payload.course._id)).modules[0].lessons.length, 0);
 
   const mock = await request('/api/admin/mock-tests', {
     method: 'POST', cookie,

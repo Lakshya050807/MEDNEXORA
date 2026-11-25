@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Icon from '../components/Icon.jsx';
 import AuthPageShell from '../components/AuthPageShell.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { registrationErrorMessage, validateRegistration } from '../utils/registrationValidation.js';
+import { postAuthenticationPath } from '../utils/authRedirect.js';
+import { launchApi } from '../services/launchApi.js';
 
 export default function RegisterPage() {
   const { user, register } = useAuth();
@@ -13,11 +15,38 @@ export default function RegisterPage() {
   const [error, setError] = useState('');
   const [fieldErrors, setFieldErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
+  const [registrationAvailability, setRegistrationAvailability] = useState('checking');
+
+  useEffect(() => {
+    let active = true;
+    launchApi.getStatus().then((status) => {
+      if (active) setRegistrationAvailability(status.registrationEnabled ? 'open' : 'closed');
+    }).catch(() => {
+      if (active) setRegistrationAvailability('unavailable');
+    });
+    return () => { active = false; };
+  }, []);
 
   if (user) {
     return (
       <AuthPageShell title="You’re signed in." description="Continue to your student dashboard.">
-        <a className="auth-submit" href="/student/dashboard">Open dashboard <Icon name="arrow" size={17} /></a>
+        <a className="auth-submit" href={postAuthenticationPath()}>Continue <Icon name="arrow" size={17} /></a>
+      </AuthPageShell>
+    );
+  }
+
+  if (registrationAvailability !== 'open') {
+    const checking = registrationAvailability === 'checking';
+    const title = checking ? 'Checking registration availability.' : 'Registration is not available.';
+    const description = checking
+      ? 'Please wait while we check whether new student accounts can be created.'
+      : registrationAvailability === 'closed'
+        ? 'New student registration is temporarily unavailable while launch information is being finalized. Existing students can still log in.'
+        : 'We could not verify registration availability. Please try again later or use your existing account to log in.';
+    return (
+      <AuthPageShell title={title} description={description} footer={<span>Already have an account? <a href="/login">Log in</a></span>}>
+        {!checking && <p className="launch-gate-message" role="status">New accounts can be created after the required public information and policies are completed and approved.</p>}
+        {checking && <p className="launch-gate-message" role="status">Checking current availability…</p>}
       </AuthPageShell>
     );
   }
@@ -35,7 +64,7 @@ export default function RegisterPage() {
     setSubmitting(true);
     try {
       await register({ name: trimmedName, email: normalizedEmail, password });
-      window.location.assign('/student/dashboard');
+      window.location.assign(postAuthenticationPath());
     } catch (requestError) {
       setError(registrationErrorMessage(requestError));
     } finally {
@@ -48,7 +77,7 @@ export default function RegisterPage() {
       eyebrow="GOVERNMENT COMPETITIVE EXAM PREPARATION"
       title="Create your candidate account."
       description="Register to access your exam preparation dashboard and study resources."
-      footer={<span>Already have an account? <a href="/login">Log in</a></span>}
+      footer={<span>Already have an account? <a href={`/login?next=${encodeURIComponent(postAuthenticationPath())}`}>Log in</a></span>}
     >
       <form className="auth-form" onSubmit={handleSubmit} noValidate>
         {error && <div className="auth-error" role="alert">{error}</div>}

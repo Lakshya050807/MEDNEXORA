@@ -2,22 +2,9 @@ import { useState } from 'react';
 import Icon from '../components/Icon.jsx';
 import AuthPageShell from '../components/AuthPageShell.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
+import { postAuthenticationPath } from '../utils/authRedirect.js';
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/u;
-
-function postLoginPath() {
-  const next = new URLSearchParams(window.location.search).get('next');
-  if (next === '/student/dashboard' || next === '/practice' || next === '/mock-tests' || next === '/practice/attempts' || next === '/my-courses' || next === '/cart' || next === '/orders') return next;
-  const orderPath = next?.match(/^\/orders\/([a-f\d]{24})$/iu);
-  if (orderPath) return `/orders/${orderPath[1]}`;
-  const coursePath = next?.match(/^\/courses\/([a-f\d]{24})\/learn$/iu);
-  if (coursePath) return `/courses/${coursePath[1]}/learn`;
-  if (next?.startsWith('/practice/attempts/')) {
-    const attemptId = next.slice('/practice/attempts/'.length);
-    if (/^[a-f\d]{24}$/iu.test(attemptId)) return `/practice/attempts/${attemptId}`;
-  }
-  return '/student/dashboard';
-}
 
 export default function LoginPage({ required = false }) {
   const { user, login } = useAuth();
@@ -26,11 +13,12 @@ export default function LoginPage({ required = false }) {
   const [error, setError] = useState('');
   const [fieldErrors, setFieldErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
+  const registerHref = `/register?next=${encodeURIComponent(postAuthenticationPath())}`;
 
   if (user) {
     return (
-      <AuthPageShell title="You’re signed in." description="Continue to your student dashboard or checkout." footer={<a href="/register">Create another student account</a>}>
-        <a className="auth-submit" href={postLoginPath()}>Continue <Icon name="arrow" size={17} /></a>
+      <AuthPageShell title="You’re signed in." description="Continue to your student dashboard or checkout." footer={<a href={registerHref}>Create another student account</a>}>
+        <a className="auth-submit" href={postAuthenticationPath()}>Continue <Icon name="arrow" size={17} /></a>
       </AuthPageShell>
     );
   }
@@ -49,7 +37,7 @@ export default function LoginPage({ required = false }) {
     setSubmitting(true);
     try {
       await login({ email: normalizedEmail, password });
-      window.location.assign(postLoginPath());
+      window.location.assign(postAuthenticationPath());
     } catch (requestError) {
       setError(requestError.message || 'We couldn’t sign you in. Please try again.');
     } finally {
@@ -62,7 +50,7 @@ export default function LoginPage({ required = false }) {
       eyebrow={required ? 'STUDENT ACCESS REQUIRED' : 'WELCOME BACK'}
       title="Log in to your account."
       description={required ? 'Sign in to continue to your protected Government Competitive Exam Preparation dashboard.' : 'Access your student dashboard, courses and exam preparation resources.'}
-      footer={<span>New to MEDNEXORA? <a href="/register">Create a student account</a></span>}
+      footer={<span>New to MEDNEXORA? <a href={registerHref}>Create a student account</a></span>}
     >
       <form className="auth-form" onSubmit={handleSubmit} noValidate>
         {error && <div className="auth-error" role="alert">{error}</div>}
@@ -76,6 +64,7 @@ export default function LoginPage({ required = false }) {
           <input id="login-password" name="password" type="password" autoComplete="current-password" maxLength={72} value={password} onChange={(event) => setPassword(event.target.value)} aria-invalid={Boolean(fieldErrors.password)} aria-describedby={fieldErrors.password ? 'login-password-error' : undefined} />
           {fieldErrors.password && <small id="login-password-error" className="field-error">{fieldErrors.password}</small>}
         </label>
+        <p className="auth-secondary-link"><a href="/forgot-password">Forgot your password?</a></p>
         <button className="auth-submit" type="submit" disabled={submitting}>{submitting ? 'Signing in…' : 'Log in'} <Icon name="arrow" size={17} /></button>
       </form>
     </AuthPageShell>

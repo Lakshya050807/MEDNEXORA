@@ -213,6 +213,46 @@ test('registration and login create a safe profile, access dashboard, and logout
   assert.equal(dashboardAfterLogout.response.headers.get('cache-control'), 'no-store');
 });
 
+test('closed production launch status blocks new registration but preserves existing student login', async () => {
+  const gatedServer = await listen(createAuthTestApp({
+    launchConfig: { registrationEnabled: false, paidPurchasesEnabled: false },
+  }));
+  const gatedUrl = `http://127.0.0.1:${gatedServer.address().port}`;
+  try {
+    const status = await requestAt(gatedUrl, '/api/launch/status');
+    assert.equal(status.response.status, 200);
+    assert.equal(status.response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(status.body, { registrationEnabled: false, paidPurchasesEnabled: false });
+    assert.doesNotMatch(JSON.stringify(status.body), /APPROVED|secret|credential/i);
+
+    const blocked = await requestAt(gatedUrl, '/api/auth/register', {
+      method: 'POST', body: { name: 'New Student', email: 'new@example.com', password: 'safe-registration-pass-42' },
+    });
+    assert.equal(blocked.response.status, 503);
+    assert.deepEqual(blocked.body, {
+      code: 'PUBLIC_LAUNCH_GATE_CLOSED',
+      message: 'New student registration is temporarily unavailable.',
+    });
+    assert.equal(usersByEmail.size, 0, 'a closed gate does not create an account');
+
+    await FakeUserModel.create({
+      name: 'Existing Student',
+      email: 'existing@example.com',
+      passwordHash: await bcrypt.hash('existing-student-pass-42', 12),
+      role: 'student',
+    });
+    const login = await requestAt(gatedUrl, '/api/auth/login', {
+      method: 'POST', body: { email: 'existing@example.com', password: 'existing-student-pass-42' },
+    });
+    assert.equal(login.response.status, 200);
+    const profile = await requestAt(gatedUrl, '/api/auth/me', { cookie: login.cookie });
+    assert.equal(profile.response.status, 200);
+    assert.equal(profile.body.user.email, 'existing@example.com');
+  } finally {
+    await new Promise((resolve, reject) => gatedServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test('Secure student cookies are emitted behind Railway’s trusted HTTPS proxy and persist across profile refresh', async () => {
   const details = { name: 'Asha Student', email: 'asha@example.com', password: 'careful-study-pass-42' };
   const registration = await request('/api/auth/register', { method: 'POST', body: details });

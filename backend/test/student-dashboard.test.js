@@ -138,6 +138,8 @@ beforeEach(async () => {
   const now = new Date('2026-10-21T10:00:00Z');
   const studentId = '507f1f77bcf86cd799430001';
   const otherStudentId = '507f1f77bcf86cd799430002';
+  const publishedExam = { _id: ids.exam, name: 'B.Sc. Nursing Entrance Examination', publicationStatus: 'published' };
+  const publishedBiology = { _id: ids.subject, name: 'Biology', exam: ids.exam, publicationStatus: 'published' };
   const order = {
     _id: ids.order, student: studentId, status: 'paid', paymentVerifiedAt: now, accessGrantedAt: now,
     amountPaise: 25000, currency: 'INR', createdAt: now,
@@ -151,13 +153,13 @@ beforeEach(async () => {
     topics: [{ _id: ids.topic, name: 'Cell structure', subject: ids.subject }],
     products: [
       { _id: ids.productPdf, title: 'Biology revision notes', description: 'Configured private Biology notes.', thumbnailUrl: '', resourceType: 'notes', pricePaise: 5000, discountPaise: 0, currentPricePaise: 5000, subject: { _id: ids.subject, name: 'Biology', publicationStatus: 'published' }, chapter: null, exam: { _id: ids.exam, name: 'B.Sc. Nursing Entrance Examination', publicationStatus: 'published' }, contentUrl: 'https://files.example.test/private/biology.pdf', publicationStatus: 'published', updatedAt: now },
-      { _id: ids.productCourse, title: 'Biology recorded course', description: 'Configured course.', thumbnailUrl: '', resourceType: 'video-course', pricePaise: 20000, discountPaise: 0, currentPricePaise: 20000, subject: { _id: ids.subject, name: 'Biology', publicationStatus: 'published' }, chapter: null, exam: { _id: ids.exam, name: 'B.Sc. Nursing Entrance Examination', publicationStatus: 'published' }, contentUrl: '', publicationStatus: 'published', updatedAt: now },
+      { _id: ids.productCourse, title: 'Biology recorded course', description: 'Configured course.', thumbnailUrl: '', resourceType: 'video-course', pricePaise: 20000, discountPaise: 0, currentPricePaise: 20000, subject: null, chapter: null, exam: { _id: ids.exam, name: 'B.Sc. Nursing Entrance Examination', publicationStatus: 'published' }, contentUrl: '', publicationStatus: 'published', updatedAt: now },
       { _id: ids.productFreeMock, title: 'Free original example mock', resourceType: 'mock-test', pricePaise: 0, discountPaise: 0, currentPricePaise: 0, subject: { _id: ids.subject, name: 'Biology', publicationStatus: 'published' }, chapter: null, exam: { _id: ids.exam, name: 'B.Sc. Nursing Entrance Examination', publicationStatus: 'published' }, publicationStatus: 'published' },
       { _id: ids.productFreePdf, title: 'Free Biology worksheet', description: 'A configured free worksheet for Biology practice.', resourceType: 'practice-paper', pricePaise: 0, discountPaise: 0, currentPricePaise: 0, subject: { _id: ids.subject, name: 'Biology', publicationStatus: 'published' }, chapter: null, exam: { _id: ids.exam, name: 'B.Sc. Nursing Entrance Examination', publicationStatus: 'published' }, contentUrl: 'https://files.example.test/private/free-worksheet.pdf', publicationStatus: 'published', updatedAt: now },
       { _id: ids.productPaidPdf, title: 'Paid Biology notes', description: 'A configured paid resource for Biology study.', resourceType: 'notes', pricePaise: 5000, discountPaise: 0, currentPricePaise: 5000, subject: { _id: ids.subject, name: 'Biology', publicationStatus: 'published' }, chapter: null, exam: { _id: ids.exam, name: 'B.Sc. Nursing Entrance Examination', publicationStatus: 'published' }, contentUrl: 'https://files.example.test/private/paid-notes.pdf', publicationStatus: 'published', updatedAt: now },
     ],
     courses: [{
-      _id: ids.course, product: ids.productCourse, exam: { name: 'B.Sc. Nursing Entrance Examination' }, courseType: 'video-course', publicationStatus: 'published',
+      _id: ids.course, product: ids.productCourse, exam: publishedExam, subjects: [publishedBiology], courseType: 'video-course', publicationStatus: 'published',
       modules: [{ sortOrder: 0, lessons: [
         { _id: ids.lessonOne, title: 'Introduction', sortOrder: 0 },
         { _id: ids.lessonTwo, title: 'Cell basics', sortOrder: 1 },

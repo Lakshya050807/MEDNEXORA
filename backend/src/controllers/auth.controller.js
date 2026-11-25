@@ -63,14 +63,14 @@ export function createAuthController({ UserModel }) {
       }
 
       try {
-        const user = await UserModel.findOne({ email }).select('+passwordHash');
+        const user = await UserModel.findOne({ email }).select('+passwordHash +studentSessionVersion');
         const passwordHash = user?.passwordHash ?? dummyPasswordHash;
         const passwordMatches = await bcrypt.compare(password, passwordHash);
         if (!user || !passwordMatches || user.role !== 'student') {
           return response.status(401).json({ message: 'Email or password is incorrect.' });
         }
 
-        await regenerateStudentSession(request, user._id ?? user.id);
+        await regenerateStudentSession(request, user._id ?? user.id, user.studentSessionVersion);
         return response.status(200).json({ user: toStudentProfile(user) });
       } catch (error) {
         return next(error);

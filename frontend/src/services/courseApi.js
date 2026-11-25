@@ -6,12 +6,13 @@ export class CourseApiError extends Error {
   }
 }
 
-async function getJson(path, { method = 'GET', body, signal } = {}) {
+async function getJson(path, { method = 'GET', body, signal, cache = 'no-store' } = {}) {
   let response;
   try {
     response = await fetch(`/api${path}`, {
       method,
       credentials: 'same-origin',
+      cache,
       signal,
       headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -50,6 +51,12 @@ export const courseApi = {
   },
   async myCourses(options = {}) {
     return getJson('/student/courses', options);
+  },
+  async enroll(courseId, options = {}) {
+    return getJson(`/student/courses/${encodeURIComponent(courseId)}/enroll`, { ...options, method: 'POST', body: {} });
+  },
+  async lessonContent(courseId, lessonId, options = {}) {
+    return getJson(`/student/courses/${encodeURIComponent(courseId)}/lessons/${encodeURIComponent(lessonId)}/content`, options);
   },
   async progress(courseId, options = {}) {
     return getJson(`/student/courses/${encodeURIComponent(courseId)}/progress`, options);

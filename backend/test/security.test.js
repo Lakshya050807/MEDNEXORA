@@ -32,6 +32,7 @@ test('production configuration rejects blanket proxy trust and requires HTTPS fr
   const baseEnv = {
     ...process.env,
     NODE_ENV: 'production',
+    APP_ENV: 'production',
     RAZORPAY_MODE: 'live',
     RAZORPAY_KEY_ID: 'rzp_live_security-test-key-id',
     RAZORPAY_KEY_SECRET: 'security-test-live-api-secret',
@@ -89,6 +90,7 @@ test('production configuration requires an explicit absolute private storage pat
   const baseEnv = {
     ...process.env,
     NODE_ENV: 'production',
+    APP_ENV: 'production',
     RAZORPAY_MODE: 'live',
     RAZORPAY_KEY_ID: 'rzp_live_security-test-key-id',
     RAZORPAY_KEY_SECRET: 'security-test-live-api-secret',
@@ -131,6 +133,7 @@ test('the retired examination-source override no longer affects direct publicati
     env: {
       ...process.env,
       NODE_ENV: 'production',
+      APP_ENV: 'production',
       RAZORPAY_MODE: 'live',
       RAZORPAY_KEY_ID: 'rzp_live_security-test-key-id',
       RAZORPAY_KEY_SECRET: 'security-test-live-api-secret',

@@ -9,7 +9,37 @@ const sessionMaxAgeDays = Number(process.env.SESSION_MAX_AGE_DAYS ?? '7');
 const appOriginValue = process.env.APP_ORIGIN ?? 'http://localhost:5173';
 const trustProxyValue = process.env.TRUST_PROXY ?? '0';
 const nodeEnv = process.env.NODE_ENV ?? 'development';
-const appEnv = process.env.APP_ENV ?? (nodeEnv === 'production' ? 'production' : nodeEnv);
+const configuredAppEnv = process.env.APP_ENV;
+const appEnv = configuredAppEnv ?? (nodeEnv === 'production' ? '' : nodeEnv);
+const productionRuntime = nodeEnv === 'production';
+const launchApprovalNames = [
+  'PUBLIC_ABOUT_PAGE_APPROVED',
+  'PUBLIC_CONTACT_PAGE_APPROVED',
+  'PUBLIC_FAQ_PAGE_APPROVED',
+  'PUBLIC_PRIVACY_POLICY_APPROVED',
+  'PUBLIC_TERMS_PAGE_APPROVED',
+  'PUBLIC_REFUND_POLICY_APPROVED',
+];
+function readBooleanSetting(name, defaultValue) {
+  const value = process.env[name];
+  if (value === undefined) return defaultValue;
+  if (value.trim().toLowerCase() === 'true') return true;
+  if (value.trim().toLowerCase() === 'false') return false;
+  throw new Error(`${name} must be either true or false.`);
+}
+const launchApprovals = Object.fromEntries(launchApprovalNames.map((name) => [
+  name,
+  readBooleanSetting(name, !productionRuntime),
+]));
+const launchApprovalsComplete = Object.values(launchApprovals).every(Boolean);
+const registrationRequested = readBooleanSetting('PUBLIC_BETA_REGISTRATION_ENABLED', !productionRuntime);
+const paidPurchasesRequested = readBooleanSetting('PUBLIC_BETA_PAID_PURCHASES_ENABLED', !productionRuntime);
+const passwordResetEmailEnabled = readBooleanSetting('PASSWORD_RESET_EMAIL_ENABLED', false);
+const resendApiKey = process.env.RESEND_API_KEY?.trim() ?? '';
+const resendApiKeyValid = resendApiKey.length > 0 && resendApiKey.length <= 512 && /^[!-~]+$/u.test(resendApiKey);
+if (passwordResetEmailEnabled && !resendApiKeyValid) {
+  throw new Error('Configure a valid RESEND_API_KEY before enabling PASSWORD_RESET_EMAIL_ENABLED.');
+}
 const configuredRazorpayMode = process.env.RAZORPAY_MODE;
 const razorpayMode = configuredRazorpayMode ?? 'test';
 const razorpayKeyId = process.env.RAZORPAY_KEY_ID ?? '';
@@ -34,6 +64,9 @@ if (frontendStaticDirectories.some((directory) => isWithinDirectory(directory, p
 if (!['development', 'test', 'production'].includes(nodeEnv)) {
   throw new Error('NODE_ENV must be development, test, or production.');
 }
+if (nodeEnv === 'production' && configuredAppEnv === undefined) {
+  throw new Error('APP_ENV must be explicitly set to staging or production when NODE_ENV=production.');
+}
 if (!['development', 'test', 'staging', 'production'].includes(appEnv)) {
   throw new Error('APP_ENV must be development, test, staging, or production.');
 }
@@ -54,6 +87,12 @@ if (nodeEnv === 'production' && !configuredMongoUri) {
 }
 if (configuredMongoUri && !/^mongodb(?:\+srv)?:\/\//u.test(configuredMongoUri)) {
   throw new Error('MONGODB_URI must use the mongodb:// or mongodb+srv:// scheme.');
+}
+if (productionRuntime && (registrationRequested || paidPurchasesRequested) && !launchApprovalsComplete) {
+  throw new Error('Public registration and paid purchases require all six owner-approved public information and policy pages.');
+}
+if (productionRuntime && paidPurchasesRequested && appEnv !== 'production') {
+  throw new Error('Paid purchases may only be enabled when APP_ENV=production; staging remains test-only.');
 }
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -156,6 +195,13 @@ export const env = Object.freeze({
   port,
   nodeEnv,
   appEnv,
+  publicRegistrationEnabled: registrationRequested && (!productionRuntime || launchApprovalsComplete),
+  paidPurchasesEnabled: paidPurchasesRequested && (!productionRuntime || launchApprovalsComplete),
+  passwordResetEmailEnabled,
+  passwordResetEmail: Object.freeze({
+    apiKey: resendApiKeyValid ? resendApiKey : '',
+    configured: resendApiKeyValid,
+  }),
   mongoUri: configuredMongoUri || 'mongodb://127.0.0.1:27017/nursing_education',
   sessionSecret,
   sessionMaxAgeMs: sessionMaxAgeDays * 24 * 60 * 60 * 1000,

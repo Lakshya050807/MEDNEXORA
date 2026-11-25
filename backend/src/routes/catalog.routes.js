@@ -4,15 +4,15 @@ import { createRateLimiter } from '../middleware/rateLimit.js';
 
 export function createCatalogRoutes(models) {
   const router = Router();
-  router.use(createRateLimiter({ windowMs: 60 * 1000, max: 300 }));
+  const limitCatalogRequests = createRateLimiter({ windowMs: 60 * 1000, max: 300 });
   const controller = createCatalogController(models);
-  router.get('/products', controller.listProducts);
-  router.get('/products/:id', controller.getProduct);
-  router.get('/exams', controller.listExams);
-  router.get('/exams/:id', controller.getExam);
-  router.get('/subjects', controller.listSubjects);
-  router.get('/chapters', controller.listChapters);
-  router.get('/topics', controller.listTopics);
+  router.get('/products', limitCatalogRequests, controller.listProducts);
+  router.get('/products/:id', limitCatalogRequests, controller.getProduct);
+  router.get('/exams', limitCatalogRequests, controller.listExams);
+  router.get('/exams/:id', limitCatalogRequests, controller.getExam);
+  router.get('/subjects', limitCatalogRequests, controller.listSubjects);
+  router.get('/chapters', limitCatalogRequests, controller.listChapters);
+  router.get('/topics', limitCatalogRequests, controller.listTopics);
   return router;
 }
 

@@ -10,7 +10,9 @@ export function createStudentCourseRoutes({ UserModel, ...models }) {
   router.use(createRateLimiter({ windowMs: 60 * 1000, max: 300 }));
   router.use(requireStudentAuth({ UserModel }));
   router.get('/', controller.listMyCourses);
+  router.post('/:courseId/enroll', verifyOrigin, createRateLimiter({ windowMs: 60 * 1000, max: 20 }), controller.enrollFreeCourse);
   router.get('/:courseId/progress', controller.getProgress);
+  router.get('/:courseId/lessons/:lessonId/content', controller.getLessonContent);
   router.post('/:courseId/lessons/:lessonId/complete', verifyOrigin, controller.completeLesson);
   router.get('/:courseId/lessons/:lessonId/playback', controller.getLessonPlayback);
   return router;

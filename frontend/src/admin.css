@@ -235,12 +235,70 @@
 .admin-settings-card .admin-primary-button:hover { background: var(--royal-gold); }
 .admin-settings-card .admin-secondary-button { border-color: var(--gold-border); color: var(--deep-emerald); }
 
+.admin-readiness-section { display: grid; gap: 14px; margin: 18px 0 22px; }
+.admin-readiness-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; }
+.admin-readiness-heading .eyebrow { margin: 0 0 5px; color: #73570A; font-size: 9px; font-weight: 850; letter-spacing: .9px; }
+.admin-readiness-heading h2 { margin: 0 0 5px; font-size: 20px; }
+.admin-readiness-heading p:last-child { margin: 0; color: #637368; font-size: 11px; line-height: 1.6; }
+.admin-readiness-count-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.admin-readiness-count-card, .admin-readiness-card { min-width: 0; padding: 16px; border: 1px solid var(--muted-border); border-radius: 13px; background: var(--white); box-shadow: 0 6px 20px rgba(3, 26, 20, .035); }
+.admin-readiness-count-card { display: grid; gap: 6px; }
+.admin-readiness-count-card > span { color: #586A5D; font-size: 11px; font-weight: 750; }
+.admin-readiness-count-card > strong { color: var(--deep-emerald); font-size: 25px; line-height: 1.1; }
+.admin-readiness-count-card > small { color: #68796D; font-size: 9px; line-height: 1.5; }
+.admin-readiness-count-card > small b { color: var(--deep-emerald); }
+.admin-readiness-count-card > small i { padding: 0 2px; color: #A48A42; font-style: normal; }
+.admin-readiness-grid { display: grid; grid-template-columns: minmax(0, .86fr) minmax(0, 1.14fr); align-items: start; gap: 13px; }
+.admin-readiness-card { display: grid; gap: 12px; }
+.admin-readiness-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.admin-readiness-card-heading h3 { margin: 0 0 4px; font-size: 15px; }
+.admin-readiness-card-heading p { margin: 0; color: #65766A; font-size: 10px; line-height: 1.55; }
+.readiness-pill { flex: 0 0 auto; padding: 6px 8px; border: 1px solid var(--gold-border); border-radius: 99px; color: #70550D; background: #FBF6E7; font-size: 9px; font-weight: 800; }
+.readiness-pill.is-complete { border-color: #B7D4BE; color: #286144; background: #EDF6EF; }
+.admin-readiness-empty { margin: 0; padding: 14px; border: 1px dashed var(--muted-border); border-radius: 9px; color: #637368; font-size: 11px; line-height: 1.6; }
+.admin-readiness-issues, .admin-course-readiness-list { display: grid; gap: 9px; }
+.admin-readiness-issue, .admin-course-readiness-item { min-width: 0; padding: 11px; border: 1px solid var(--muted-border); border-radius: 10px; background: #FBFAF6; }
+.admin-readiness-issue-summary { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 7px 9px; }
+.readiness-issue-count { width: 27px; height: 27px; display: grid; place-items: center; border: 1px solid var(--gold-border); border-radius: 8px; color: #73570A; background: #FBF2D8; font-size: 11px; font-weight: 850; }
+.admin-readiness-issue-summary > strong { color: var(--deep-emerald); font-size: 10px; line-height: 1.45; }
+.admin-readiness-link { justify-self: start; padding: 4px 0; border: 0; color: #73570A; background: transparent; font-size: 9px; font-weight: 800; text-align: left; cursor: pointer; }
+.admin-readiness-link:hover { color: var(--deep-emerald); text-decoration: underline; }
+.admin-readiness-issue-summary .admin-readiness-link { grid-column: 2; }
+.admin-readiness-issue > ul { display: grid; gap: 4px; margin: 8px 0 0 37px; padding: 0; list-style: none; }
+.admin-readiness-issue > ul li { color: #65766A; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.admin-course-readiness-item > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--muted-border); }
+.admin-course-readiness-item > header > div { min-width: 0; display: grid; gap: 4px; }
+.admin-course-readiness-item > header strong { color: var(--deep-emerald); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.admin-course-readiness-item > header small { color: #64766A; font-size: 9px; }
+.admin-course-readiness-item > header .curriculum-course-status { padding: 5px 8px; font-size: 8px; }
+.admin-course-readiness-item > ul { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.admin-course-readiness-item > ul > li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: start; gap: 8px; padding: 9px 0; border-bottom: 1px solid rgba(8, 37, 27, .08); }
+.admin-course-readiness-item > ul > li:last-child { padding-bottom: 0; border-bottom: 0; }
+.readiness-check-mark { width: 21px; height: 21px; display: grid; place-items: center; border-radius: 50%; font-size: 10px; font-weight: 900; }
+.readiness-check-mark.is-complete { color: #286144; background: #E8F4EA; }
+.readiness-check-mark.is-warning { color: #785B0B; background: #FBF1D1; }
+.admin-course-readiness-item > ul > li > div { min-width: 0; display: grid; gap: 3px; }
+.admin-course-readiness-item > ul > li > div strong { color: #31473A; font-size: 9px; line-height: 1.4; }
+.admin-course-readiness-item > ul > li > div small { color: #6A786E; font-size: 9px; line-height: 1.5; }
+.admin-course-readiness-item > ul > li .admin-readiness-link { align-self: center; white-space: nowrap; }
+.admin-readiness-loading, .admin-readiness-error { display: flex; align-items: center; gap: 12px; }
+.admin-readiness-loading p, .admin-readiness-error p { margin: 0; color: #637368; font-size: 11px; }
+.admin-readiness-loading .loading-mark { width: 22px; height: 22px; margin: 0; }
+.admin-readiness-error { justify-content: space-between; }
+.admin-readiness-error h2 { margin: 0 0 5px; font-size: 16px; }
+.admin-readiness-error p { line-height: 1.55; }
+
 @media (max-width: 900px) {
   .admin-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-readiness-count-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-readiness-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 720px) {
   .admin-settings-grid { grid-template-columns: 1fr; }
+  .admin-readiness-card { padding: 12px; }
+  .admin-course-readiness-item > ul > li { grid-template-columns: 22px minmax(0, 1fr); }
+  .admin-course-readiness-item > ul > li .admin-readiness-link { grid-column: 2; }
   .admin-settings-logout { grid-column: auto; }
   .admin-student-total { align-self: flex-start; }
   .admin-students-table { min-width: 1080px; }

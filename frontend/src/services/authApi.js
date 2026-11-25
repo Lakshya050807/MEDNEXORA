@@ -43,6 +43,8 @@ function postJson(path, body) {
 
 export const authApi = {
   register: (details) => postJson('/auth/register', details),
+  requestPasswordReset: (email) => postJson('/auth/forgot-password', { email }),
+  resetPassword: (details) => postJson('/auth/reset-password', details),
   login: (credentials) => postJson('/auth/login', credentials),
   logout: () => postJson('/auth/logout', {}),
   currentUser: () => request('/auth/me'),

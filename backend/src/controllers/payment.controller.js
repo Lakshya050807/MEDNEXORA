@@ -68,6 +68,7 @@ export function createPaymentController({
   RefundModel,
   gateway,
   paymentConfig,
+  paidPurchasesEnabled = false,
   clock = () => new Date(),
   reservationSetupWindowMs = 10 * 60 * 1000,
 }) {
@@ -494,6 +495,12 @@ export function createPaymentController({
   return {
     createCheckout: async (request, response, next) => {
       try {
+        if (!paidPurchasesEnabled) {
+          return response.status(503).json({
+            code: 'PUBLIC_LAUNCH_GATE_CLOSED',
+            message: 'Paid purchases are temporarily unavailable.',
+          });
+        }
         if (!paymentEnabled) return response.status(503).json({ message: 'Payments are not configured yet. Add Razorpay test credentials to the backend environment.' });
         const body = request.body ?? {};
         const checkoutKey = body.idempotencyKey;
