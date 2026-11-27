@@ -10,6 +10,7 @@ export function createAuthRoutes({
   registrationEnabled = false,
   passwordResetEmailSender,
   passwordResetEmailEnabled = false,
+  passwordResetDiagnosticLogger,
   appOrigin,
 }) {
   const router = Router();
@@ -18,6 +19,7 @@ export function createAuthRoutes({
     UserModel,
     emailSender: passwordResetEmailSender,
     emailEnabled: passwordResetEmailEnabled,
+    diagnosticLogger: passwordResetDiagnosticLogger,
     appOrigin,
   });
   const requireStudent = requireStudentAuth({ UserModel });

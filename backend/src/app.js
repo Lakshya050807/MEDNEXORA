@@ -56,6 +56,7 @@ export function createApp({
   },
   passwordResetEmailSender = createPasswordResetEmailSender(env.passwordResetEmail),
   passwordResetEmailEnabled = env.passwordResetEmailEnabled,
+  passwordResetDiagnosticLogger,
   paymentConfig = {
     keyId: env.razorpayKeyId,
     keySecret: env.razorpayKeySecret,
@@ -117,6 +118,7 @@ export function createApp({
     registrationEnabled: launchConfig.registrationEnabled === true,
     passwordResetEmailSender,
     passwordResetEmailEnabled,
+    passwordResetDiagnosticLogger,
     appOrigin: env.appOrigin,
   }));
   const practiceModels = { UserModel, QuestionBankModel, MockTestModel, ProductModel, PurchasedAccessModel, TestAttemptModel, ExamModel, SubjectModel, TopicModel, ChapterModel };

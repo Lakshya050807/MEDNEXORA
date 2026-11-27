@@ -24,9 +24,16 @@ let usersByEmail;
 let usersById;
 let nextId;
 let sentEmails;
+let diagnosticEvents;
 let emailSender;
 let loseActivationAck;
 let failCleanup;
+let failStudentLookup;
+let failPendingWrite;
+let returnNullPendingWrite;
+let losePendingWriteAck;
+let returnNullActivation;
+let failDiagnosticLogger;
 let server;
 let baseUrl;
 
@@ -49,6 +56,7 @@ function applyUpdate(user, update) {
 
 class FakeUserModel {
   static findOne(filter) {
+    if (failStudentLookup) throw new Error('simulated lookup failure');
     const user = [...usersByEmail.values()].find((candidate) => matches(candidate, filter));
     return new Query(user ?? null);
   }
@@ -58,12 +66,21 @@ class FakeUserModel {
   }
 
   static async findOneAndUpdate(filter, update) {
+    if (update.$set?.passwordResetTokenHash) {
+      if (failPendingWrite) throw new Error('simulated challenge write failure');
+      if (returnNullPendingWrite) return null;
+    }
+    if (update.$set?.passwordResetStatus === 'active' && returnNullActivation) return null;
     if (failCleanup && update.$unset?.passwordResetTokenHash && !update.$inc?.studentSessionVersion) {
       throw new Error('simulated cleanup failure');
     }
     const user = [...usersByEmail.values()].find((candidate) => matches(candidate, filter));
     if (!user) return null;
     applyUpdate(user, update);
+    if (losePendingWriteAck && update.$set?.passwordResetTokenHash) {
+      losePendingWriteAck = false;
+      throw new Error('simulated lost challenge-write acknowledgement after commit');
+    }
     if (loseActivationAck && update.$set?.passwordResetStatus === 'active') {
       loseActivationAck = false;
       throw new Error('simulated lost activation acknowledgement after commit');
@@ -117,13 +134,29 @@ async function seedStudent(email = 'student@example.test') {
   return user;
 }
 
+function diagnosticEventsFor(requestEvents) {
+  const requestIds = new Set(requestEvents.map(({ requestId }) => requestId));
+  assert.equal(requestIds.size, 1, 'all events for one request share one correlation ID');
+  const [requestId] = requestIds;
+  assert.match(requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu);
+  for (const event of requestEvents) assert.deepEqual(Object.keys(event).sort(), ['event', 'requestId']);
+  return requestEvents.map(({ event }) => event);
+}
+
 beforeEach(async () => {
   usersByEmail = new Map();
   usersById = new Map();
   nextId = 1;
   sentEmails = [];
+  diagnosticEvents = [];
   loseActivationAck = false;
   failCleanup = false;
+  failStudentLookup = false;
+  failPendingWrite = false;
+  returnNullPendingWrite = false;
+  losePendingWriteAck = false;
+  returnNullActivation = false;
+  failDiagnosticLogger = false;
   emailSender = {
     configured: true,
     async sendPasswordReset(message) { sentEmails.push(message); },
@@ -133,6 +166,10 @@ beforeEach(async () => {
     UserModel: FakeUserModel,
     passwordResetEmailSender: emailSender,
     passwordResetEmailEnabled: true,
+    passwordResetDiagnosticLogger(line) {
+      if (failDiagnosticLogger) throw new Error('simulated diagnostic logger failure');
+      diagnosticEvents.push(JSON.parse(line));
+    },
     launchConfig: { registrationEnabled: false, paidPurchasesEnabled: false },
   });
   server = await listen(app);
@@ -159,6 +196,140 @@ test('reset request is generic, stores a digest and activates only after mocked 
   assert.equal(url.searchParams.has('token'), false);
   assert.equal(user.passwordResetTokenHash, createHash('sha256').update(token).digest('hex'));
   assert.notEqual(user.passwordResetTokenHash, token);
+  assert.equal(user.passwordResetStatus, 'active');
+  assert.equal(user.passwordResetActivationConfirmed, true);
+});
+
+test('diagnostics are ordered, correlated, allowlisted and omit personal or reset data', async () => {
+  const user = await seedStudent('private-account@example.test');
+  const existingStart = diagnosticEvents.length;
+  const existing = await request('/api/auth/forgot-password', { method: 'POST', body: { email: user.email } });
+  const existingEvents = diagnosticEvents.slice(existingStart);
+  const token = new URLSearchParams(new URL(sentEmails[0].url).hash.slice(1)).get('token');
+  const digest = user.passwordResetTokenHash;
+
+  assert.equal(existing.response.status, 202);
+  assert.deepEqual(diagnosticEventsFor(existingEvents), [
+    'recovery_request_received',
+    'student_lookup_matched',
+    'challenge_write_acknowledged',
+    'sender_invoked',
+    'sender_accepted',
+    'challenge_activation_succeeded',
+  ]);
+  const missingStart = diagnosticEvents.length;
+  const missing = await request('/api/auth/forgot-password', { method: 'POST', body: { email: 'missing@example.test' } });
+  const missingEvents = diagnosticEvents.slice(missingStart);
+
+  assert.equal(missing.response.status, 202);
+  assert.deepEqual(missing.payload, existing.payload);
+  assert.deepEqual(diagnosticEventsFor(missingEvents), [
+    'recovery_request_received',
+    'student_lookup_not_matched',
+  ]);
+  assert.notEqual(existingEvents[0].requestId, missingEvents[0].requestId);
+  const serialized = JSON.stringify([...existingEvents, ...missingEvents]);
+  assert.equal(serialized.includes(user.email), false);
+  assert.equal(serialized.includes(token), false);
+  assert.equal(serialized.includes(digest), false);
+  assert.equal(serialized.includes(user.passwordHash), false);
+});
+
+test('challenge write failures are correlated and do not invoke the sender', async () => {
+  const user = await seedStudent();
+  failPendingWrite = true;
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const response = await request('/api/auth/forgot-password', { method: 'POST', body: { email: user.email } });
+    assert.equal(response.response.status, 500);
+    assert.deepEqual(diagnosticEventsFor(diagnosticEvents), [
+      'recovery_request_received',
+      'student_lookup_matched',
+      'challenge_write_failed',
+    ]);
+    assert.equal(sentEmails.length, 0);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('a committed challenge write with lost acknowledgement is not treated as send authorization', async () => {
+  const user = await seedStudent();
+  losePendingWriteAck = true;
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const response = await request('/api/auth/forgot-password', { method: 'POST', body: { email: user.email } });
+    assert.equal(response.response.status, 500);
+    assert.doesNotMatch(JSON.stringify(response.payload), /lost challenge-write acknowledgement/iu);
+    assert.deepEqual(diagnosticEventsFor(diagnosticEvents), [
+      'recovery_request_received',
+      'student_lookup_matched',
+      'challenge_write_failed',
+    ]);
+    assert.equal(user.passwordResetStatus, 'pending');
+    assert.equal(user.passwordResetActivationConfirmed, false);
+    assert.equal(sentEmails.length, 0);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('student lookup database failures are recorded without exposing details to the client', async () => {
+  failStudentLookup = true;
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const response = await request('/api/auth/forgot-password', { method: 'POST', body: { email: 'student@example.test' } });
+    assert.equal(response.response.status, 500);
+    assert.doesNotMatch(JSON.stringify(response.payload), /simulated lookup failure/iu);
+    assert.deepEqual(diagnosticEventsFor(diagnosticEvents), [
+      'recovery_request_received',
+      'student_lookup_failed',
+    ]);
+    assert.equal(sentEmails.length, 0);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('a no-match challenge write is recorded while the HTTP response remains generic', async () => {
+  const user = await seedStudent();
+  returnNullPendingWrite = true;
+  const response = await request('/api/auth/forgot-password', { method: 'POST', body: { email: user.email } });
+  assert.equal(response.response.status, 202);
+  assert.deepEqual(diagnosticEventsFor(diagnosticEvents), [
+    'recovery_request_received',
+    'student_lookup_matched',
+    'challenge_write_failed',
+  ]);
+  assert.equal(sentEmails.length, 0);
+});
+
+test('activation no-match is recorded and leaves the challenge unusable', async () => {
+  const user = await seedStudent();
+  returnNullActivation = true;
+  const response = await request('/api/auth/forgot-password', { method: 'POST', body: { email: user.email } });
+  assert.equal(response.response.status, 202);
+  assert.deepEqual(diagnosticEventsFor(diagnosticEvents), [
+    'recovery_request_received',
+    'student_lookup_matched',
+    'challenge_write_acknowledged',
+    'sender_invoked',
+    'sender_accepted',
+    'challenge_activation_failed',
+  ]);
+  assert.equal(user.passwordResetStatus, 'pending');
+  assert.equal(user.passwordResetActivationConfirmed, false);
+});
+
+test('diagnostic logger failures do not change recovery behavior', async () => {
+  const user = await seedStudent();
+  failDiagnosticLogger = true;
+  const response = await request('/api/auth/forgot-password', { method: 'POST', body: { email: user.email } });
+  assert.equal(response.response.status, 202);
+  assert.equal(sentEmails.length, 1);
   assert.equal(user.passwordResetStatus, 'active');
   assert.equal(user.passwordResetActivationConfirmed, true);
 });
@@ -245,6 +416,14 @@ test('pending challenge cannot be used when email delivery fails and cleanup als
   try {
     const response = await request('/api/auth/forgot-password', { method: 'POST', body: { email: user.email } });
     assert.equal(response.response.status, 202);
+    assert.deepEqual(diagnosticEventsFor(diagnosticEvents), [
+      'recovery_request_received',
+      'student_lookup_matched',
+      'challenge_write_acknowledged',
+      'sender_invoked',
+      'sender_failed',
+      'challenge_cleanup_failed',
+    ]);
     const token = new URLSearchParams(new URL(sentEmails[0].url).hash.slice(1)).get('token');
     assert.equal(user.passwordResetStatus, 'pending');
     assert.equal(user.passwordResetActivationConfirmed, false);
@@ -259,6 +438,24 @@ test('pending challenge cannot be used when email delivery fails and cleanup als
   }
 });
 
+test('email delivery failure with acknowledged cleanup records cleanup success', async () => {
+  const user = await seedStudent();
+  emailSender.sendPasswordReset = async () => { throw new Error('simulated provider rejection'); };
+  const response = await request('/api/auth/forgot-password', { method: 'POST', body: { email: user.email } });
+  assert.equal(response.response.status, 202);
+  assert.deepEqual(diagnosticEventsFor(diagnosticEvents), [
+    'recovery_request_received',
+    'student_lookup_matched',
+    'challenge_write_acknowledged',
+    'sender_invoked',
+    'sender_failed',
+    'challenge_cleanup_succeeded',
+  ]);
+  assert.equal(user.passwordResetStatus, undefined);
+  assert.equal(user.passwordResetExpiresAt, undefined);
+  assert.equal(user.passwordResetActivationConfirmed, undefined);
+});
+
 test('a post-commit activation acknowledgement loss leaves an unusable challenge if cleanup also fails', async () => {
   const user = await seedStudent();
   loseActivationAck = true;
@@ -268,6 +465,15 @@ test('a post-commit activation acknowledgement loss leaves an unusable challenge
   try {
     const response = await request('/api/auth/forgot-password', { method: 'POST', body: { email: user.email } });
     assert.equal(response.response.status, 202);
+    assert.deepEqual(diagnosticEventsFor(diagnosticEvents), [
+      'recovery_request_received',
+      'student_lookup_matched',
+      'challenge_write_acknowledged',
+      'sender_invoked',
+      'sender_accepted',
+      'challenge_activation_failed',
+      'challenge_cleanup_failed',
+    ]);
     const token = new URLSearchParams(new URL(sentEmails[0].url).hash.slice(1)).get('token');
     assert.equal(user.passwordResetStatus, 'active');
     assert.equal(user.passwordResetActivationConfirmed, false);
@@ -289,6 +495,7 @@ test('email delivery stays disabled unless both the feature gate and sender are 
     UserModel: FakeUserModel,
     passwordResetEmailSender: { configured: true, async sendPasswordReset() { throw new Error('must not send'); } },
     passwordResetEmailEnabled: false,
+    passwordResetDiagnosticLogger(line) { diagnosticEvents.push(JSON.parse(line)); },
     launchConfig: { registrationEnabled: false, paidPurchasesEnabled: false },
   });
   const disabledServer = await listen(app);
